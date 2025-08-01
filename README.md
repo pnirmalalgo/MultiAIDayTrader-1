@@ -1,0 +1,2 @@
+# MultiAIDayTrader
+Implement MCP
