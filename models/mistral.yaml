@@ -1,0 +1,4 @@
+name: mistral
+backend: llama
+parameters:
+  model: mistral-7b.Q4_K_M.gguf
