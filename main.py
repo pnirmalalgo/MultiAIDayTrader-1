@@ -2,8 +2,9 @@ from agents.interpreter import interpret_query
 from agents.ticker_lookup import resolve_ticker
 from agents.codegen import generate_code
 from agents.code_cleaner import clean_code
+from tasks.executor import app
 from tasks.executor import run_python_code  # Celery task
-
+from celery.result import AsyncResult
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
 
@@ -46,9 +47,29 @@ builder.add_edge("codegen", "code_cleaner")
 builder.add_edge("code_cleaner", "executor")
 builder.add_edge("executor", END)
 
-app = builder.compile()
+langgraph_app = builder.compile()
 
 if __name__ == "__main__":
     query = input("📈 Your query:\n> ")
-    final = app.invoke({"input": query})
+    final = langgraph_app.invoke({"input": query})
     print("\n📊 Task ID / Result:\n", final["execution_result"])
+
+    execution_result = final['execution_result']
+
+    # Split by colon and strip whitespace
+    task_id = execution_result.split(":")[-1].strip()
+
+    print("Task ID:", task_id)
+    # Create an AsyncResult instance
+
+    async_result = AsyncResult(task_id, app=app)
+
+    # Wait and fetch result
+    # Waits up to 10 seconds, polls every 0.5 seconds
+    try:
+        result = async_result.get(timeout=10, interval=0.5)
+        print("Task result:", result)
+    except Exception as e:
+        print("Error during result.get():", e)
+        print("Task state:", async_result.state)
+        print("Task traceback:", async_result.traceback)
