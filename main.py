@@ -7,6 +7,9 @@ from tasks.executor import run_python_code  # Celery task
 from celery.result import AsyncResult
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
+import pandas as pd
+import yfinance as yf
+import json
 
 class GraphState(TypedDict):
     input: str
@@ -20,11 +23,54 @@ def node_interpreter(state):
     result = interpret_query(user_input)  # This should return {"intent": "..."}
     return result
 
-def node_ticker_lookup(state):
-    return resolve_ticker(state["intent"])
+def fetch_stock_data(ticker, start_date, end_date):
+    #stock_data = pd.DataFrame(columns=["Date", "Close"])
+    print(start_date)
+    print(end_date)
+    try:
+        
+        stock_data_point = yf.download(ticker, start=start_date, end=end_date,  auto_adjust=True)
+        #print(stock_data_point)
+        #if not stock_data_point.empty:
+            #stock_data = stock_data.append({"Date": date, "Close": stock_data_point['Close'][0]}, ignore_index=True)
+    except Exception as e:
+        print(f"Error fetching data for: {e}")
+
+    return stock_data_point
+'''
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    dates = date_range.strftime('%Y-%m-%d').tolist()
+
+    print(dates)
+    
+    for date in dates:
+        try:
+            stock_data_point = yf.download(ticker, start=date, end=date)
+            if not stock_data_point.empty:
+                stock_data = stock_data.append({"Date": date, "Close": stock_data_point['Close'][0]}, ignore_index=True)
+        except Exception as e:
+            print(f"Error fetching data for {date}: {e}")
+   ''' 
+    
 
 def node_codegen(state):
-    return generate_code(state["intent"])
+    cleaned_content = state["intent"].replace("```json\n", "").replace("\n```", "")
+    #parsed_query = state["intent"]
+    print("Cleaned content:", cleaned_content)
+    parsed_query = json.loads(cleaned_content)
+    print(parsed_query)
+    ticker = parsed_query["ticker"]
+    start_date = parsed_query["start_date"]
+    end_date = parsed_query["end_date"]
+    buy_condition = parsed_query["buy_condition"]
+    sell_condition = parsed_query["sell_condition"]
+
+    # Fetch stock data for the relevant dates
+    stock_data = fetch_stock_data(ticker, start_date, end_date)
+    print("last dataframe:", stock_data)
+    cleaned_content = state["intent"].replace("```json\n", "").replace("\n```", "")
+    print("intent before code generation:", cleaned_content)
+    return generate_code(cleaned_content, stock_data)
 
 def node_cleaner(state):
     return clean_code(state["code"])
@@ -35,14 +81,14 @@ def node_executor(state):
 
 builder = StateGraph(GraphState)
 builder.add_node("interpreter", node_interpreter)
-builder.add_node("ticker_lookup", node_ticker_lookup)
+#builder.add_node("ticker_lookup", node_ticker_lookup)
 builder.add_node("codegen", node_codegen)
 builder.add_node("code_cleaner", node_cleaner)
 builder.add_node("executor", node_executor)
 
 builder.set_entry_point("interpreter")
-builder.add_edge("interpreter", "ticker_lookup")
-builder.add_edge("ticker_lookup", "codegen")
+#builder.add_edge("interpreter", "ticker_lookup")
+builder.add_edge("interpreter", "codegen")
 builder.add_edge("codegen", "code_cleaner")
 builder.add_edge("code_cleaner", "executor")
 builder.add_edge("executor", END)
@@ -72,4 +118,4 @@ if __name__ == "__main__":
     except Exception as e:
         print("Error during result.get():", e)
         print("Task state:", async_result.state)
-        print("Task traceback:", async_result.traceback)
+        print("Task traceback:", async_result.traceback)    
