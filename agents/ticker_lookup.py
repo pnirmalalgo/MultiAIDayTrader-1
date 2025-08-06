@@ -11,7 +11,7 @@ load_dotenv()
 # Access the API key
 api_key = os.getenv("OPENAI_API_KEY")
 
-llm = ChatOpenAI(temperature=0.2, openai_api_key=api_key)
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, openai_api_key=api_key)
 
 
 def resolve_ticker(intent_json: str) -> dict:
