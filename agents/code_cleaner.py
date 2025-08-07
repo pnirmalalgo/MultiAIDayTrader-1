@@ -12,14 +12,17 @@ api_key = os.getenv("OPENAI_API_KEY")
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, openai_api_key=api_key)
 
 def clean_code(code: str) -> dict:
-    '''
+    
     messages = [
         SystemMessage(content="You are a Python code formatter. " \
-        "Clean and organize the following code, add any missing imports, and remove any unnecessary comments." \
-        "The code should only contain executable code."),
+        "Clean and organize the following code, add any missing imports" \
+        "Important: Do not add '''python to the code. It breaks the code"
+        "Remove all comments. Only executable python code needed."
+        "The code should only contain executable code."
+        "Add necessary code to ignore warnings."),
         HumanMessage(content=code)
     ]
     
     response = llm.invoke(messages)
-    '''
-    return {"clean_code": code}
+    print("Code cleaned using LLM:", response.content)
+    return {"clean_code": response.content}

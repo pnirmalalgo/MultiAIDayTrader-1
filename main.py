@@ -10,6 +10,7 @@ from langgraph.graph import StateGraph, END
 import pandas as pd
 import yfinance as yf
 import json
+import sqlite3
 
 class GraphState(TypedDict):
     input: str
@@ -23,6 +24,15 @@ def node_interpreter(state):
     result = interpret_query(user_input)  # This should return {"intent": "..."}
     return result
 
+def save_dataframe_to_sqlite(df, db_name='market_data.db', table_name='stock_data'):
+    conn = sqlite3.connect(db_name)
+    df.to_sql(table_name, conn, if_exists='replace', index=False)
+    query = "SELECT * FROM stock_data"
+    data = pd.read_sql(query, conn)
+    print("data from database:")
+    print(data)
+    conn.close()
+
 def fetch_stock_data(ticker, start_date, end_date):
     #stock_data = pd.DataFrame(columns=["Date", "Close"])
     print(start_date)
@@ -30,12 +40,16 @@ def fetch_stock_data(ticker, start_date, end_date):
     try:
         
         stock_data_point = yf.download(ticker, start=start_date, end=end_date,  auto_adjust=True)
+        stock_data_point.columns = ['Close', 'High', 'Low', 'Open', 'Volume']
+        stock_data_point['Ticker'] = ticker
         #print(stock_data_point)
         #if not stock_data_point.empty:
             #stock_data = stock_data.append({"Date": date, "Close": stock_data_point['Close'][0]}, ignore_index=True)
     except Exception as e:
         print(f"Error fetching data for: {e}")
 
+    # Save to SQLite
+    save_dataframe_to_sqlite(stock_data_point)
     return stock_data_point
 '''
     date_range = pd.date_range(start=start_date, end=end_date, freq='D')

@@ -2,7 +2,7 @@ from langchain.chat_models import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage
 import json
 import pandas as pd
-
+import sqlite3
 from dotenv import load_dotenv
 import os
 
@@ -35,28 +35,17 @@ def generate_code(intent_json: str, stock_data: pd.DataFrame) -> dict:
         f"6. Calculate and PRINT Annualized returns, maximum drawdown, volatility of the backtested strategy."\
         f"7. No need to calculate Daily_Returns. "\
         f"7. Plot the 'Close' price of the stock along with the buy and sell signals on the same chart using `matplotlib`."\
-        f"8. Here is the stock relevant stock data:"\
-        f"{df_json}"
+        f"8. Data can be found from SQLLite3 database: market_data.db, table:  stock_data. Query this table using pandas.read_sql: select * from stock_data. Select all data - do not filter it as the table only contains relevant data."\
+        #f"{df_json}"
         )
     print(prompt)
     messages = [
-        SystemMessage(content="Write simple python code. Do not use yfinance. VERY IMP: DO NOT include'''python. '''python causes code to break. Required data is passed with the query. Use ta library. Initialize ta class."\
+        SystemMessage(content="Write simple python code. Do not use yfinance. VERY IMP: DO NOT include'''python. '''python causes code to break. Required data is stored in SQLite3 table provided in the query. Use ta library. Initialize ta class."\
                       "Include required libraries eg. numpy. Initialize ta class properly. Use: from ta.momentum import RSIIndicator. Please note: DO NOT use ta.add_all_ta_features(This is not required and gives error). We only need close data as of now. "\
                       "DO NOT include any comments. Only executable python code. Print output as per instructions."),
         HumanMessage(content=prompt)
     ]
-    '''
-    prompt = "Write code for Test RELIANCE: buy RSI under 35, sell RSI over 65, last 6 months using closing data." \
-             "Do not plot graph. Only show data. Initialize ta class properly."\
-             "Please note: DO NOT use ta.add_all_ta_features(This is not required and gives error). We only need close data as of now. "\
-             
-                        
-    messages = [
-        SystemMessage(content="Write simple python code. User yfinance, ta. Initialize ta class."\
-                      "Do not plot graph. Only show data. Initialize ta class properly. Please note: DO NOT use ta.add_all_ta_features(This is not required and gives error). We only need close data as of now. "\
-                      "DO NOT include any comments. Only executable python code."),
-        HumanMessage(content=prompt)
-    ]'''
+    
 
     response = llm.invoke(messages)
     print("Generated code: ",response.content)
