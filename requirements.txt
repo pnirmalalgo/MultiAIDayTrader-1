@@ -1,0 +1,9 @@
+yfinance
+ta
+celery
+redis
+langchain
+langgraph
+langchain_community
+openai
+celery

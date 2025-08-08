@@ -29,11 +29,8 @@ def generate_code(intent_json: str, stock_data: pd.DataFrame) -> dict:
     
     prompt = (f"Write code for following: All conditions included(DO NOT include any comments. Only executable python code. VERY IMP: DO NOT include'''python. '''python causes code to break. Do not include pip install statements.): 1. Do not use yfinance. Required data is passed with the query. and `ta` libraries. But do not install. No pip install statements." \
         f"2. Download stock data for '{ticker}' from {date_range} using `yfinance`.Use: from ta.momentum import RSIIndicator"\
-        f"3. Calculate the Relative Strength Index (RSI) using the `ta` library on the 'Close' price." \
-        f"4. Generate buy signals when the RSI crosses below {buy_condition} and sell signals when the RSI crosses above {sell_condition}."\
-        f"5. Backtest a simple trading strategy based on these signals: buy when a buy signal occurs (if not already in a position) and sell when a sell signal occurs (if in a position)."\
-        f"6. Calculate and PRINT Annualized returns, maximum drawdown, volatility of the backtested strategy."\
-        f"7. No need to calculate Daily_Returns. "\
+        f"3. Write code for {strategy} and following buy_condition={buy_condition} and sell condition={sell_condition}" \
+        "6. Calculate and PRINT Annualized returns, maximum drawdown, volatility of the backtested strategy."\
         f"7. Plot the 'Close' price of the stock along with the buy and sell signals on the same chart using `matplotlib`."\
         f"8. Data can be found from SQLLite3 database: market_data.db, table:  stock_data. Query this table using pandas.read_sql: select * from stock_data. Select all data - do not filter it as the table only contains relevant data."\
         #f"{df_json}"
