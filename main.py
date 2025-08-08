@@ -28,44 +28,60 @@ def node_interpreter(state):
 def save_dataframe_to_sqlite(df, db_name='market_data.db', table_name='stock_data'):
     conn = sqlite3.connect(db_name)
     df.to_sql(table_name, conn, if_exists='replace', index=False)
+
+    # Close the connection
     conn.close()
 
-def fetch_stock_data(ticker, start_date, end_date):
+
+
+def fetch_stock_data(tickers, start_date, end_date):
+    print(tickers)
     #stock_data = pd.DataFrame(columns=["Date", "Close"])
     print(start_date)
     print(end_date)
     try:
+        if isinstance(tickers, str):
+            tickers = [t.strip() for t in tickers.split(',')]
+        elif isinstance(tickers, list):
+            tickers = tickers
+        else:
+            raise ValueError("Ticker must be a string or list")
+        # Instead, fetch separately for each ticker and concat with ticker column
+        dfs = []
+
+        for tkr in tickers:
+            print("tkr:", tkr)
+            df = yf.download(tkr, start=start_date, end=end_date, auto_adjust=True)
+            
+            if df.empty:
+                print(f"No data returned for {tkr}")
+                continue
+            if isinstance(df.columns, pd.MultiIndex):
+                # Flatten columns to only first level (Open, High, Low, etc.)
+                df.columns = df.columns.get_level_values(0)
+            df = df.reset_index()  # Make 'Date' a column instead of index
+            df['Ticker'] = tkr     # Add ticker column
+            df = df[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume']]  # Reorder columns
+            dfs.append(df)
+            print("df:", df)
+            print("dffs:", dfs)
+
+        # Only concat if dfs is not empty
+        if dfs:
+            final_df = pd.concat(dfs, ignore_index=True)
+            print(final_df.head())
+        else:
+            print("No data fetched for any ticker.")
         
-        stock_data_point = yf.download(ticker, start=start_date, end=end_date,  auto_adjust=True)
-        
-        # Flatten multi-index columns if needed
-        if isinstance(stock_data_point.columns, pd.MultiIndex):
-            stock_data_point.columns = stock_data_point.columns.get_level_values(0)
-
-        # Keep only expected columns, fill missing with NaNs
-        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
-        for col in required_cols:
-            if col not in stock_data_point.columns:
-                stock_data_point[col] = pd.NA  # or 0 if you prefer
-
-        # Add Ticker column
-        stock_data_point['Ticker'] = ticker
-
-        # Reorder columns
-        stock_data_point = stock_data_point[['Ticker', 'Close', 'High', 'Low', 'Open', 'Volume']]
-
-        stock_data_point.reset_index(inplace=True)  # Optional: reset index to expose date as a column
-        print(stock_data_point)
-        
-        if stock_data_point.empty:
+        if final_df.empty:
             raise Exception("yfinance did not return data. Please try another query or try again later.")
     except Exception as e:
         print(f"Error fetching data for: {e}")
         sys.exit(1)
 
     # Save to SQLite
-    save_dataframe_to_sqlite(stock_data_point)
-    return stock_data_point
+    save_dataframe_to_sqlite(final_df)
+    return final_df
     
 
 def node_codegen(state):
