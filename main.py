@@ -12,6 +12,9 @@ import yfinance as yf
 import json
 import sqlite3
 import sys
+import requests
+import os
+from dotenv import load_dotenv
 
 class GraphState(TypedDict):
     input: str
@@ -28,10 +31,74 @@ def node_interpreter(state):
 def save_dataframe_to_sqlite(df, db_name='market_data.db', table_name='stock_data'):
     conn = sqlite3.connect(db_name)
     df.to_sql(table_name, conn, if_exists='replace', index=False)
-
     # Close the connection
     conn.close()
 
+
+def fetch_fmp_single_ticker(tkr, ticker_try, start_date, end_date):
+    load_dotenv()
+    FMP_API_KEY = os.getenv("FMP_API_KEY")
+    """Fetch stock data from FMP for a single ticker in yfinance-like format."""
+    url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker_try}?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
+    resp = requests.get(url)
+    
+    if resp.status_code != 200:
+        print(f"HTTP Error {resp.status_code} for {ticker_try}")
+        return pd.DataFrame()
+    
+    data = resp.json()
+    if "historical" not in data or not data["historical"]:
+        return pd.DataFrame()
+    
+    df = pd.DataFrame(data["historical"])
+    df.rename(columns={
+        "date": "Date",
+        "close": "Close",
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "volume": "Volume",
+        "adjClose": "Adj Close" if "adjClose" in df.columns else "Close"
+    }, inplace=True)
+    
+    # Keep only required columns (some might be missing)
+    keep_cols = [c for c in ["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"] if c in df.columns]
+    df = df[keep_cols]
+    
+    # Add Ticker column
+    df["Ticker"] = tkr
+    return df
+
+def get_fmp_stock_data(tickers, start_date, end_date):
+    try:
+        # Normalize tickers input
+        if isinstance(tickers, str):
+            tickers = [t.strip() for t in tickers.split(",")]
+        elif not isinstance(tickers, list):
+            raise ValueError("Tickers must be a string or list")
+        
+        dfs = []
+        for tkr in tickers:
+            for suffix in [".NS", ".BS", ""]:
+                ticker_try = tkr + suffix if suffix else tkr
+                print(f"Trying ticker: {ticker_try}")
+                df = fetch_fmp_single_ticker(tkr, ticker_try, start_date, end_date)
+                if not df.empty:
+                    dfs.append(df)
+                    break  # Success, no need to try next suffix
+            else:
+                print(f"No data found for {tkr} with any suffix")
+        
+        if not dfs:
+            raise Exception("No data fetched for any ticker.")
+        
+        final_df = pd.concat(dfs, ignore_index=True)
+        save_dataframe_to_sqlite(final_df)
+        return final_df
+    
+    except Exception as e:
+        print(f"Error fetching data: {e}")
+        sys.exit(1)
 
 
 def fetch_stock_data(tickers, start_date, end_date):
@@ -86,7 +153,7 @@ def fetch_stock_data(tickers, start_date, end_date):
 
 def node_codegen(state):
     cleaned_content = state["intent"].replace("```json\n", "").replace("\n```", "")
-    #parsed_query = state["intent"]
+    #parsed_query = state["intent"]Test RELIANCE: buy RSI under 35, sell RSI over 65, last 6 months
     print("Cleaned content:", cleaned_content)
     parsed_query = json.loads(cleaned_content)
     print(parsed_query)
@@ -96,8 +163,11 @@ def node_codegen(state):
     buy_condition = parsed_query["buy_condition"]
     sell_condition = parsed_query["sell_condition"]
 
+    print(ticker)
+    
     # Fetch stock data for the relevant dates
-    stock_data = fetch_stock_data(ticker, start_date, end_date)
+    #stock_data = fetch_stock_data(ticker, start_date, end_date)
+    stock_data = get_fmp_stock_data(ticker, start_date, end_date)
     cleaned_content = state["intent"].replace("```json\n", "").replace("\n```", "")
     print("intent before code generation:", cleaned_content)
     return generate_code(cleaned_content, stock_data)
