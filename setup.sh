@@ -9,3 +9,5 @@ sudo apt install redis-server -y
 sudo service redis-server start
 
 celery -A tasks.executor worker --loglevel=info
+
+python3 -m http.server 8000
