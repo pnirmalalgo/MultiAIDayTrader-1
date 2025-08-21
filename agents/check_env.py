@@ -1,2 +1,2 @@
-import sys
-print(sys.executable)
+import os
+print("Celery worker CWD:", os.getcwd())

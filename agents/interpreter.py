@@ -58,6 +58,16 @@ def interpret_query(query: str) -> dict:
     - value (if applicable)
     - duration_days: number of days
     - duration_type: "consecutive" or "non-consecutive"
+    - Before generating code or interpreting conditions, verify that all comparison operators correctly reflect the query's intended logic.
+        For example, if the query says "stock trading below 20-day MA for X days", then the condition must express:
+        current price < 20-day MA
+        not the opposite (20-day MA < current price), which means trading above the MA.
+        Similarly, if a condition specifies consecutive duration, ensure the logic is applied correctly across all required days.
+        To summarize:
+        Confirm that any "indicator vs current price" comparisons align with the natural language phrase in the query.
+        Double-check that the operator (< or >) is not inverted.
+        Ensure that the duration constraint (e.g., 3 consecutive days) is implemented on the correct comparison direction.
+        If you find any inversion or mismatch, flip the operator and adjust the logic accordingly before code generation.
     The user has provided the following backtest query:
     
     {query}

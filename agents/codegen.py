@@ -25,56 +25,188 @@ def generate_code(intent_json: str, stock_data: pd.DataFrame) -> dict:
     sell_condition = parsed.get("sell_condition", "")
     date_range = parsed.get("date_range", "")
 
+    # Convert the JSON to a string to pass into the prompt
+    intent_json_str = json.dumps(intent_json)
+    prompt = f"""
+    Write Python code to implement the following stock trading strategy.
+    Ensure the output is only executable Python code — no comments, markdown, pip install statements, or ```python wrappers.
+
+    General Instructions:
+    1. Use only `pandas` and the `ta` library (assume pre-installed).
+    2. DO NOT fetch data from yfinance or any other API.
+    3. Use `sqlite3` and `pandas.read_sql` to load data from `market_data.db`, table: `stock_data`.
+    - Columns: 'Open', 'High', 'Low', 'Close', 'Volume', 'Ticker', 'Date'
+    - Order data in ascending order of `Date`.
+
+    Strategy Requirements:
+    4. Strategy type, buy/sell logic, and indicators (e.g., RSI, MACD, MA) are given below:
+    Strategy: {strategy}
+    Buy Condition: {buy_condition}
+    Sell Condition: {sell_condition}    
+    5. Compute only the indicators mentioned in the strategy.
+    6. For `turning` with `value: positive`: detect sign change from negative to positive.
+    Example: (macd[i-1] < 0) & (macd[i] > 0)
+
+    Signal Logic:
+    7. Combine multiple conditions using the logic key (`and`/`or`) in a vectorized way using `&` / `|` with parentheses.
+    - DO NOT use Python's plain `and` / `or` on pandas Series.
+    8. For duration_type = "consecutive", use rolling windows to check if condition is met for duration_days.
+    Example: RSI < 30 for 2 consecutive days → use `.rolling(window=2).apply(...)`
+
+    Buy/Sell Execution Rules:
+    9. Use a flag `position_open` to track whether a position is currently open.
+    - Start with position_open = False
+    - Set to True on a buy; set to False on a sell
+    10. Sell signals should only be generated if a position is open.
+    11. Ignore sells before the first buy.
+    12. Do not allow consecutive buys or sells — signals must strictly alternate: buy → sell → buy.
     
-    # Convert DataFrame to JSON string
-    df_json = stock_data.to_json(orient='records')  # Each record as a JSON object
-    print(df_json)
-    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    prompt = (f"Write code for following: All conditions included(DO NOT include any comments. Only executable python code. VERY IMP: DO NOT include'''python. '''python causes code to break. Do not include pip install statements.): 1. Do not use yfinance. Required data is passed with the query. and `ta` libraries. But do not install. No pip install statements." \
-        f"You are given a JSON object describing a stock trading strategy."\
-        f"Your task is to generate working Python code using pandas and ta that:"\
-        f"Computes all indicators mentioned in the strategy (RSI, MACD, etc.). Code should calulate only the strategy asked for. "\
-        f"Implements buy and sell logic as described in the JSON."\
-        f"For operator: turning, value: positive: Detect when an indicator changes sign from negative to positive between consecutive days. Example for MACD: (macd[i-1] < 0) & (macd[i] > 0)."\
-        f"Combine multiple conditions using the logic key (and/or) in a vectorized way (& / | with parentheses). Do not use plain Python and/or on pandas Series."\
-        f"For sell conditions involving Profit: Calculate percentage change from the last buy price and check if it meets the threshold."\
-        f"Avoid ambiguous boolean errors by always using vectorized pandas comparisons and combining with & / |."\
-        f"3. Write code for {strategy} and following buy_condition={buy_condition} and sell condition={sell_condition}" \
-        f"ONLY If duration_type = 'consecutive' then for duration_days: Check that the condition has been met for the required number of consecutive days (e.g., RSI < 30 for 2 consecutive days). Use rolling windows to do this."\
-        f"4. IMPORTANT WHEN MORE THAN ONE TICKER: If there are more than one tickers, Generate the below results and graph for each ticker. Also compare the results of all tickers in a table."\
-        f"5. Calculate and PRINT: Annualized returns, maximum drawdown, volatility of the backtested strategy for each of the tickers."\
-        f"6. Plot the 'Close' price of the stock along with the buy and sell signals on the same chart using `Plotly` for each ticker. Also plot Moving Average ONLY IF MA IS MENTIONED in strategy as dotted lines of different colors."\
-        f"When plotting buy and sell signals, use different marker shapes (for example, triangle-up for buy and triangle-down for sell) so that if buy and sell occur on the same date and price, both are visible and don’t overlap as a single dot. Do not offset the y-axis values. Plot it as a blue line."\
-        f"VERY IMPORTANT: After generating buy and sell signals, print the exact rows of the DataFrame that will be plotted as buy and sell markers. Show them separately: first print the buy signals DataFrame (only rows where buy is not NaN), then print the sell signals DataFrame (only rows where sell is not NaN). Ensure the printed data includes the date index, price, and any relevant indicator values used for the decision. This will help verify that plotted points match the actual signals generated."\
-        f"7. Save the plot as an html file and output the name and path of the file. Use filename={ticker}_plot"\
-        f"8. Data can be found from SQLLite3 database: market_data.db, table:  stock_data. Query this table using pandas.read_sql. Also make sure the data is ordered in ascending order of Date."\
-        f"IMPORTANT: Add code to print the data from above query for debugging purposes."\
-        f"9. Name of columns to be used: 'Open', 'High', 'Low', 'Close', 'Volume', 'Ticker', 'Date' accordingly."\
-        f"10. VERY IMPORTANT — Position Management Rules Clarification:"\
-        f"A sell signal must ONLY be generated inside the loop if there is an open position (position_open=True)."\
-        f"At the start, position_open=False. When a buy is triggered, set position_open=True. When a sell is triggered, set position_open=False."\
-        f"This ensures no sell signal ever occurs before the first buy signal. Do not simply filter sells after generation — implement this logic in the loop."\
-        f"Buy and sell signals must strictly alternate: buy → sell → buy → sell. If a condition for sell occurs but no buy is active, ignore it."\
-        f"Do not allow consecutive buys without a sell in between, and do not allow consecutive sells without a buy in between."\
-        f"Make sure that when you create buy_df and sell_df, they still contain the 'buy' and 'sell' columns along with any other indicators. Do not drop these columns when subsetting. Alternatively, you can just use data['buy'].dropna() and data['sell'].dropna() directly instead of relying on the subset DataFrames. Avoid writing code that later tries to access columns that were not included in the DataFrame slice."\
-        f"VERY IMPORTANT: When calculating returns, align buy and sell prices so their ARRAYS HAVE SAME LENGTH. Use only completed trades (buy followed by sell). If the last trade is open, ignore it. i.e. drop the last buy row if no. of rows in buy is greater than no. of rows in sell."\
-        f"Also calculate cumulative returns, annualized return, volatility, and maximum drawdown using only completed trades."\
-        #f"VERY IMPORTANT: After generating buy and sell signals, do not assign trade returns directly to the full stock data DataFrame."\
-       # f"Instead, align buy and sell signals, and create a separate DataFrame called trades. When creating the trades DataFrame, always align buy and sell trades by using the minimum length of both. Do not let extra buys or sells cause index mismatch errors."\
-        f"If asked for cumulative returns over time, map them back only to the sell dates in the main DataFrame."
-        f"14. Ensure these DataFrames exactly match the markers plotted on the chart — no mismatches."\
-        f"VERY IMPORTANT: After generating buy and sell signals, REMOVE any sell signal whose date occurs before the first buy signal. This ensures that the plotted signals and backtest only show sells that happen after a corresponding buy. This is very important. Seems like there are still sell signals whose date is before any other buy signal. No such sell signal should remain whose date is before ANY buy signal."
-        f"VERY IMPORTANT: Add code to check empty datasets. ValueError: zero-size array to reduction operation minimum which has no identity"\
-        f"This happens when there are no buy or sell signals, so buy_prices or sell_prices is empty."\
-        f"VERY IMPORTANT (Missing this instruction gives error): Ensure any cumulative operations (cummax(), cumprod(), cumsum(), pct_change()) are called only on pandas Series or DataFrame objects, never directly on NumPy arrays."\
-        f"If the variable is a NumPy array but needs a cumulative method eg. cumulative_returns, convert it first using pd.Series() or pd.DataFrame()."\
-        f"Do not convert Pandas Series to NumPy arrays (by using .values) when calculating returns, cumulative returns, drawdowns, or volatility. Keep them as Pandas Series so that methods like .cumprod() and .cummax() are available."\
-        f"variable_name must be a pandas Series/DataFrame, not a NumPy array. Convert with pd.Series() first."
-        f"Replace variable_name with the actual variable."\
-        f"When checking a Pandas Series or DataFrame for truth values, always use .any() or .all() instead of relying on if with the object directly, because the truth value of a Series is ambiguous."\
-        f"When checking conditions inside a loop (working with single float values), do not use Pandas Series methods like .between(). Instead, use direct comparisons like 40 <= value <= 60. Only use .between() when working with the whole Pandas Series."\
-        f"Please modify the code so that it handles empty arrays gracefully. For example, if no trades occur, return None (or 0) for annualized_return, max_drawdown, and volatility instead of crashing. Also add a log/print message so we know no trades were executed."\
-    )
+    Buy/Sell Signal Alignment:
+
+    - Do not forward-fill Buy/Sell columns.
+    - DO NOT reassign index using data.index[buy_prices.index] — THIS CAUSES INDEXERROR.
+    - Avoid manually resetting or reassigning indices on filtered signal series; trust their inherited indices from the source data to maintain correct time alignment.
+    - After generating buy_signals and sell_signals, create the trades DataFrame, then drop rows where both Buy and Sell are NaN:
+        trades.dropna(how='all', inplace=True)
+    - Extract buy_prices and sell_prices using .dropna():
+        buy_prices = trades['Buy'].dropna()
+        sell_prices = trades['Sell'].dropna()
+    - If the number of buy/sell signals is unequal, truncate the longer one:
+        min_len = min(len(buy_prices), len(sell_prices))
+        buy_prices = buy_prices.iloc[:min_len]
+        sell_prices = sell_prices.iloc[:min_len]
+    - This ensures signals alternate and are aligned for return calculations and plotting.
+    - Always define buy_prices and sell_prices as empty pd.Series(dtype=float) before the if trades.empty: block, to avoid NameError when trades are empty.
+    - This will prevent the IndexError, keep buy/sell signals aligned, and make your code more robust and clear.
+
+    ROLLING INDICATOR:
+        For any rolling indicator (e.g., 50-day high, average volume, moving average, etc.), always apply a .shift(1) to the rolling series before comparison. This ensures the current value is compared against the most recent past indicator value — avoiding self-referential logic which prevents valid breakouts or threshold crossings from being detected.
+    
+    IMPORTANT: Ensure that moving average crossover strategies (like golden cross or death cross) are not mistakenly implemented using MACD crossovers. A death cross should specifically refer to shorter MA < longer MA (e.g., 50MA < 200MA), and not MACD < signal line.
+    Always maintain and update a variable for the current position’s entry price when trades are opened, especially if future logic depends on it (like stop-loss or target exits).
+    
+    Returns & Metrics:
+    14. Use completed trades only to compute: - Store results in a comparison table (trading_results.html). Print the name of the file.
+        - Cumulative returns
+        - Annualized return
+        - Volatility
+        - Maximum drawdown
+    IMPORTANT: Before using variables like annualized_return, volatility, etc., ensure they are always defined — even if trades are not executed. Initialize them to None before the conditional block.
+    15. Annualized return:
+            Use number of calendar days between first buy and last sell.
+            IMPORTANT: When calculating annualized_return:
+
+            First, reassign datetime indexes to buy_prices and sell_prices:
+
+            buy_prices.index = data.index[buy_prices.index]
+            sell_prices.index = data.index[sell_prices.index]
+
+
+            Then extract the first and last trade dates directly from the reassigned indexes:
+
+            buy_date = pd.to_datetime(buy_prices.index[0])
+            sell_date = pd.to_datetime(sell_prices.index[-1])
+
+
+            ✅ Do NOT index into data.index[...] again after reassignment. The buy_prices.index[...] is already datetime-like, and trying to do data.index[...] on it will fail.
+            Use this value to calculate annualized return:
+            annualized_return = cumulative_returns.iloc[-1] ** (365 / days_held) - 1 if days_held > 0 else 0
+
+            Other rules:
+            If days_held == 0, return 0 for annualized return.
+            When calculating number of days between two dates ((sell_date - buy_date).days), always make sure both are datetime objects.
+            If dates are stored in columns or come from indexes, always cast them using pd.to_datetime(...) before subtraction.
+            Do not assume .index is datetime unless you've explicitly set it with df.index = pd.to_datetime(df.index).
+    16. Volatility = standard deviation of trade returns × sqrt(252)
+    17. Handle empty trades gracefully: if no trades, return 0 or None for all metrics and print a log message.
+    IMPORTANT: - When implementing crossover-based trading signals (e.g., SMA crossovers), detect the *actual crossover event* by comparing the current and previous values of the moving averages:
+    - A **buy signal** should be generated only when the short-term MA crosses *from below to above* the long-term MA (i.e., previous short-term MA ≤ previous long-term MA AND current short-term MA > current long-term MA).
+    - A **sell signal** should be generated only when the short-term MA crosses *from above to below* the long-term MA (i.e., previous short-term MA ≥ previous long-term MA AND current short-term MA < current long-term MA).
+    - Avoid generating buy/sell signals repeatedly if the condition is just sustained (e.g., short-term MA > long-term MA) without an actual crossover event.
+    
+    Plotting: IMPORTANT: Do not run plotting logic if there is no data.
+    18. Use `plotly.graph_objects`:
+        - Plot 'Close' price as blue line
+        - Plot Buy markers (green triangle-up), Sell markers (red triangle-down)
+        - No y-offset for markers — use actual Close values
+        - Save as {ticker}_plot.html. Print the name of file.
+    Ensure plotting code that uses buy_prices or sell_prices does not crash when these are empty. Use conditional checks like: if not buy_prices.empty: and if not sell_prices.empty:
+    Ensure that buy_prices and sell_prices have a proper DatetimeIndex before plotting.
+        When you extract them using .dropna(), the index may be a default integer index.
+        You must reassign the correct datetime index using the original data DataFrame like this:
+
+        buy_prices = trades['Buy'].dropna()
+        buy_prices.index = data.index[buy_prices.index]
+
+        sell_prices = trades['Sell'].dropna()
+        sell_prices.index = data.index[sell_prices.index]
+
+        This guarantees that Plotly plots markers at the correct positions on the time axis.
+        If you skip this, the buy/sell markers may incorrectly appear around 1970 or outside the actual data range.
+        IMPORTANT: Once you've reassigned buy_prices.index and sell_prices.index using data.index[...], access the first/last dates directly via .index[0] and .index[-1]. Do not attempt to index back into data.index[...] using those values — it will cause an error.
+    
+        IMPORTANT: After generating the buy and sell signals as arrays (e.g., buy_signals and sell_signals), attach them as columns to the main ticker_data DataFrame before attempting to access or visualize them.
+
+            ✅ Example:
+
+        ticker_data['Buy'] = buy_signals  
+        ticker_data['Sell'] = sell_signals  
+
+
+        This ensures the 'Buy' and 'Sell' columns are available in ticker_data when printing or plotting.
+
+        🔁 Also, if you're using a separate trades DataFrame to store signals, ensure you use it consistently or integrate the signals back into the main DataFrame before referencing them.
+
+        Avoid using variables like buy_signals, sell_signals, or trades across different tickers without recalculating them.
+            Either:
+            Move plotting inside the main loop per ticker, or
+            Store buy/sell data separately for each ticker to avoid index mismatches.    
+    
+    19. Print the rows where buy/sell signals occur — include Date, Close, and indicators.
+        - Do not print trades.dropna() or trades[['Buy', 'Sell']].dropna() at the end of the script, as it may misleadingly appear empty. Instead, print the full trades DataFrame or use a filtered version only if it has meaningful rows (e.g., only drop rows where both Buy and Sell are NaN using dropna(how='all')).
+        
+                
+    Moving Averages:
+    20. Only compute and plot MA if explicitly mentioned in the strategy.
+        - Plot as dotted line
+        - Use different colors for different MA periods
+
+    Multi-Ticker Logic:
+    21. If multiple tickers are present:
+        - Generate plots and metrics for each ticker separately.
+        - Filter the data by ticker to generate plot and metrics for each ticker.
+        - There should be one plot html file for each ticker.
+        - And trading_results.html should contain the table containing metrics from each ticker. i.e. one row per ticker.
+        
+
+    Edge Cases & Debugging:
+    22. Print SQL query result for debugging.
+    23. Avoid ambiguous pandas boolean errors — always use parentheses in conditions
+    24. Do not use `.between()` in loops; use it only with full pandas Series
+    25. VERY IMPORTANT: For cumulative calculations like cumulative returns, max drawdown, and cumulative sums:
+        Always keep the data as pandas Series, never convert to NumPy arrays before these operations.
+        Use pandas Series methods .cumprod(), .cummax(), .cumsum().
+        Access elements with .iloc[] or .loc[] only on pandas Series or DataFrames, never on NumPy arrays.
+        When calculating returns for vectorized operations, you may convert to NumPy arrays temporarily only for element-wise arithmetic, but do not convert the resulting Series for cumulative or indexed operations.
+        To avoid errors, do vectorized math like (sell_prices - buy_prices) / buy_prices on NumPy arrays but then wrap the result back into a pandas Series before .cumprod() or .iloc usage. For example:
+            returns = pd.Series((sell_prices - buy_prices) / buy_prices)  
+            cumulative_returns = (1 + returns).cumprod()  
+            annualized_return = cumulative_returns.iloc[-1] ** (365 / days_held) - 1  
+        Never call .iloc on a NumPy array.
+    26. If no trades are executed:
+        - Print message: "No trades executed for {ticker}"
+        - Return 0 or None for all calculated metrics
+    27. When setting a column (e.g., Date) as index in a DataFrame, ensure subsequent code accessing that column uses .index instead of referring to it as a column.
+        - For example, replace df['Date'] with df.index if Date is the index.
+        - Maintain consistency between column and index usage to avoid KeyError.
+        - Alternatively, avoid setting important columns as index if they need to be accessed as columns later.
+
+    Final Output:
+    28. For each ticker:
+        - Save interactive plot as HTML file
+        - Print DataFrame rows for buy/sell points
+        - Include a summary HTML comparing metrics across tickers
+    """
     print(prompt)
     messages = [
         SystemMessage(content="Write simple python code. Do not use yfinance. VERY IMP: DO NOT include'''python. '''python causes code to break. Required data is stored in SQLite3 table provided in the query. Use the ta library, importing MACD from ta.trend and RSI from ta.momentum if needed. Initialize ta class."\
@@ -88,7 +220,6 @@ def generate_code(intent_json: str, stock_data: pd.DataFrame) -> dict:
                       "Before assigning to data['column'], validate that len(list) == len(data)."\
                       "The fix must be generic so it works for MACD, RSI, SMA, or any other indicator as applicable."\
                       "Add checks whereever necessary to see if there is no data before accessing data."
-                      
                       ),
         HumanMessage(content=prompt)
     ]
