@@ -10,7 +10,7 @@ app = Celery("executor",
 @app.task
 def run_python_code(code: str):
     filename = f"/tmp/code_{uuid.uuid4().hex}.py"
-    print(code)
+    print(code, flush=True)
     with open(filename, "w") as f:
         f.write(code)
 
