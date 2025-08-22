@@ -15,7 +15,7 @@ def clean_code(code: str) -> dict:
     
     messages = [
         SystemMessage(content="You are a Python code formatter. " \
-        "Clean and organize the following code, add any missing imports" \
+        "Clean and organize the following code, add any missing imports like: from ta.trend import SMAIndicator" \
         "Important: Do not add '''python to the code. It breaks the code"
         "Remove all comments. Only executable python code needed."
         "The code should only contain executable code."
