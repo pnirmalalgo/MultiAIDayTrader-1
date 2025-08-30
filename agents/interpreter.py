@@ -44,7 +44,7 @@ def interpret_query(query: str) -> dict:
     }}
     
     Please return a JSON object containing the following:
-    - "ticker": The stock ticker symbol not the company name (e.g., TCS)
+    - "ticker": The stock ticker symbol not the company name (e.g., TCS). Try to find the ticker symbol for each company name mentioned in the query. If multiple companies are mentioned, return all ticker symbols in a list.
     - "ticker": if there are multiple company/stock names mentioned then get the ticker name of all and return ticker names in a list.
     - "strategy": The name of the strategy (e.g., RSI)
     - "buy_condition": A dictionary with 'buy' conditions for the strategy (e.g., buy: RSI: <25, sell: RSI: >75)

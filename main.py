@@ -1,20 +1,39 @@
-from agents.interpreter import interpret_query
-from agents.ticker_lookup import resolve_ticker
-from agents.codegen import generate_code
-from agents.code_cleaner import clean_code
-from tasks.executor import app
-from tasks.executor import run_python_code  # Celery task
-from celery.result import AsyncResult
-from typing import TypedDict
-from langgraph.graph import StateGraph, END
-import pandas as pd
-import yfinance as yf
+# main.py
+
+import os
+import sys
 import json
 import sqlite3
-import sys
+import pandas as pd
+import yfinance as yf
 import requests
-import os
 from dotenv import load_dotenv
+from typing import TypedDict
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+from celery.result import AsyncResult
+
+# Import your multi-agent/langgraph modules
+from agents.interpreter import interpret_query
+from agents.codegen import generate_code
+from agents.code_cleaner import clean_code
+from langgraph.graph import StateGraph, END
+
+# Import Celery app and task
+from tasks.executor import app as celery_app
+from tasks.executor import run_python_code  # Celery task
+
+import os
+from fastapi.responses import FileResponse
+# -----------------------------
+# Type Definitions
+# -----------------------------
+
+HTML_DIR = "."
+
 
 class GraphState(TypedDict):
     input: str
@@ -23,33 +42,28 @@ class GraphState(TypedDict):
     clean_code: str
     execution_result: str
 
-def node_interpreter(state):
-    user_input = state["input"]
-    result = interpret_query(user_input)  # This should return {"intent": "..."}
-    return result
+class QueryRequest(BaseModel):
+    query: str
 
+# -----------------------------
+# Utility Functions
+# -----------------------------
 def save_dataframe_to_sqlite(df, db_name='market_data.db', table_name='stock_data'):
     conn = sqlite3.connect(db_name)
     df.to_sql(table_name, conn, if_exists='replace', index=False)
-    # Close the connection
     conn.close()
-
 
 def fetch_fmp_single_ticker(tkr, ticker_try, start_date, end_date):
     load_dotenv()
     FMP_API_KEY = os.getenv("FMP_API_KEY")
-    """Fetch stock data from FMP for a single ticker in yfinance-like format."""
     url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker_try}?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
     resp = requests.get(url)
-    
     if resp.status_code != 200:
         print(f"HTTP Error {resp.status_code} for {ticker_try}")
         return pd.DataFrame()
-    
     data = resp.json()
     if "historical" not in data or not data["historical"]:
         return pd.DataFrame()
-    
     df = pd.DataFrame(data["historical"])
     df.rename(columns={
         "date": "Date",
@@ -60,18 +74,13 @@ def fetch_fmp_single_ticker(tkr, ticker_try, start_date, end_date):
         "volume": "Volume",
         "adjClose": "Adj Close" if "adjClose" in df.columns else "Close"
     }, inplace=True)
-    
-    # Keep only required columns (some might be missing)
     keep_cols = [c for c in ["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"] if c in df.columns]
     df = df[keep_cols]
-    
-    # Add Ticker column
     df["Ticker"] = tkr
     return df
 
 def get_fmp_stock_data(tickers, start_date, end_date):
     try:
-        # Normalize tickers input
         if isinstance(tickers, str):
             tickers = [t.strip() for t in tickers.split(",")]
         elif not isinstance(tickers, list):
@@ -81,113 +90,58 @@ def get_fmp_stock_data(tickers, start_date, end_date):
         for tkr in tickers:
             for suffix in [".NS", ".BS", ""]:
                 ticker_try = tkr + suffix if suffix else tkr
-                print(f"Trying ticker: {ticker_try}")
                 df = fetch_fmp_single_ticker(tkr, ticker_try, start_date, end_date)
                 if not df.empty:
                     dfs.append(df)
-                    break  # Success, no need to try next suffix
+                    break
             else:
                 print(f"No data found for {tkr} with any suffix")
-        
         if not dfs:
             raise Exception("No data fetched for any ticker.")
-        
         final_df = pd.concat(dfs, ignore_index=True)
         save_dataframe_to_sqlite(final_df)
         return final_df
-    
     except Exception as e:
         print(f"Error fetching data: {e}")
         sys.exit(1)
 
-
-def fetch_stock_data(tickers, start_date, end_date):
-    print(tickers)
-    #stock_data = pd.DataFrame(columns=["Date", "Close"])
-    print(start_date)
-    print(end_date)
-    try:
-        if isinstance(tickers, str):
-            tickers = [t.strip() for t in tickers.split(',')]
-        elif isinstance(tickers, list):
-            tickers = tickers
-        else:
-            raise ValueError("Ticker must be a string or list")
-        # Instead, fetch separately for each ticker and concat with ticker column
-        dfs = []
-
-        for tkr in tickers:
-            print("tkr:", tkr)
-            df = yf.download(tkr, start=start_date, end=end_date, auto_adjust=True)
-            
-            if df.empty:
-                print(f"No data returned for {tkr}")
-                continue
-            if isinstance(df.columns, pd.MultiIndex):
-                # Flatten columns to only first level (Open, High, Low, etc.)
-                df.columns = df.columns.get_level_values(0)
-            df = df.reset_index()  # Make 'Date' a column instead of index
-            df['Ticker'] = tkr     # Add ticker column
-            df = df[['Date', 'Ticker', 'Open', 'High', 'Low', 'Close', 'Volume']]  # Reorder columns
-            dfs.append(df)
-            print("df:", df)
-            print("dffs:", dfs)
-
-        # Only concat if dfs is not empty
-        if dfs:
-            final_df = pd.concat(dfs, ignore_index=True)
-            print(final_df.head())
-        else:
-            print("No data fetched for any ticker.")
-        
-        if final_df.empty:
-            raise Exception("yfinance did not return data. Please try another query or try again later.")
-    except Exception as e:
-        print(f"Error fetching data for: {e}")
-        sys.exit(1)
-
-    # Save to SQLite
-    save_dataframe_to_sqlite(final_df)
-    return final_df
-    
+# -----------------------------
+# LangGraph Nodes
+# -----------------------------
+def node_interpreter(state):
+    user_input = state["input"]
+    return interpret_query(user_input)
 
 def node_codegen(state):
     cleaned_content = state["intent"].replace("```json\n", "").replace("\n```", "")
-    #parsed_query = state["intent"]Test RELIANCE: buy RSI under 35, sell RSI over 65, last 6 months
-    print("Cleaned content:", cleaned_content)
     parsed_query = json.loads(cleaned_content)
-    print(parsed_query)
     ticker = parsed_query["ticker"]
     start_date = parsed_query["start_date"]
     end_date = parsed_query["end_date"]
     buy_condition = parsed_query["buy_condition"]
     sell_condition = parsed_query["sell_condition"]
 
-    print(ticker)
-    
-    # Fetch stock data for the relevant dates
-    #stock_data = fetch_stock_data(ticker, start_date, end_date)
+    # Fetch stock data
     stock_data = get_fmp_stock_data(ticker, start_date, end_date)
-    cleaned_content = state["intent"].replace("```json\n", "").replace("\n```", "")
-    print("intent before code generation:", cleaned_content)
     return generate_code(cleaned_content, stock_data)
 
 def node_cleaner(state):
     return clean_code(state["code"])
 
 def node_executor(state):
-    result = run_python_code.delay(state["clean_code"])
+    result = run_python_code.delay(state["clean_code"])  # Submit task to Celery
     return {"execution_result": f"Task submitted: {result.id}"}
 
+# -----------------------------
+# Build LangGraph
+# -----------------------------
 builder = StateGraph(GraphState)
 builder.add_node("interpreter", node_interpreter)
-#builder.add_node("ticker_lookup", node_ticker_lookup)
 builder.add_node("codegen", node_codegen)
 builder.add_node("code_cleaner", node_cleaner)
 builder.add_node("executor", node_executor)
 
 builder.set_entry_point("interpreter")
-#builder.add_edge("interpreter", "ticker_lookup")
 builder.add_edge("interpreter", "codegen")
 builder.add_edge("codegen", "code_cleaner")
 builder.add_edge("code_cleaner", "executor")
@@ -195,27 +149,57 @@ builder.add_edge("executor", END)
 
 langgraph_app = builder.compile()
 
-if __name__ == "__main__":
-    query = input("📈 Your query:\n> ")
-    final = langgraph_app.invoke({"input": query})
-    print("\n📊 Task ID / Result:\n", final["execution_result"])
+# -----------------------------
+# FastAPI App
+# -----------------------------
+fastapi_app = FastAPI()
 
-    execution_result = final['execution_result']
+fastapi_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],  # React dev server
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    # Split by colon and strip whitespace
+@fastapi_app.post("/api/submit-query")
+async def submit_query(req: QueryRequest):
+    final = langgraph_app.invoke({"input": req.query})
+    execution_result = final["execution_result"]
     task_id = execution_result.split(":")[-1].strip()
+    return {"task_id": task_id}
 
-    print("Task ID:", task_id)
-    # Create an AsyncResult instance
-
-    async_result = AsyncResult(task_id, app=app)
-
-    # Wait and fetch result
-    # Waits up to 10 seconds, polls every 0.5 seconds
+@fastapi_app.get("/api/task-status/{task_id}")
+async def task_status(task_id: str):
+    async_result = AsyncResult(task_id, app=celery_app)  # <-- use Celery app here
+    if async_result.ready():
+        return {"status": async_result.state, "result": async_result.result}
+    else:
+        return {"status": async_result.state}
+    
+@fastapi_app.get("/api/list-html")
+def list_html_files():
     try:
-        result = async_result.get(timeout=10, interval=0.5)
-        print("Task result:", result)
+        files = [
+            f for f in os.listdir(HTML_DIR)
+            if f.endswith(".html")
+        ]
+        return {"files": files}
     except Exception as e:
-        print("Error during result.get():", e)
-        print("Task state:", async_result.state)
-        print("Task traceback:", async_result.traceback)    
+        return {"files": [], "error": str(e)}
+
+@fastapi_app.get("/api/html/{file_name}")
+def get_html(file_name: str):
+    file_path = os.path.join(HTML_DIR, file_name)
+    if os.path.exists(file_path):
+        return FileResponse(file_path, media_type="text/html")
+    return {"error": "File not found"}
+
+# -----------------------------
+# Optional: Run standalone
+# -----------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(fastapi_app, host="127.0.0.1", port=8000, reload=True)
+
+app = fastapi_app  # alias for Uvicorn
