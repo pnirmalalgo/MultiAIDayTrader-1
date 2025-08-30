@@ -34,6 +34,14 @@ Write Python code to implement the following stock trading strategy.
 
 Ensure the output is ONLY executable Python code — no comments, no markdown, no `pip install`, and NO code fences like ```python.
 
+##############################
+# GLOBAL ENFORCEMENT (READ FIRST)
+##############################
+⚠️ VERY IMPORTANT: Implement **only** the logic that is explicitly required by the given {strategy}, {buy_condition}, {sell_condition}, and any explicit {duration_type} or stop-loss clauses in the user's query.
+- If the user's query does NOT mention stop-loss, consecutive-day duration, or any other extra constraint, DO NOT add that logic in the produced code.
+- Do NOT invent stop-loss, consecutive-day counters, or any other “helpful” features unless they are explicitly present in the provided strategy/buy/sell/duration inputs.
+- The code must be minimal and strictly focused on the requested strategy.
+
 GENERAL SETUP:
 1. Use only `pandas` and `ta` (assume pre-installed).
 2. Do NOT fetch data from yfinance or APIs.
@@ -51,6 +59,8 @@ STRATEGY INPUTS:
     Strategy: {strategy}
     Buy Condition: {buy_condition}
     Sell Condition: {sell_condition}
+    Duration: {duration_type}        # (if present; otherwise empty/None)
+    
 
 INDICATOR COMPUTATION:
 6. Compute only indicators mentioned in the strategy. Example: if SMA20 and SMA50 are required, compute them using `.shift(1)` to avoid lookahead bias.
@@ -59,6 +69,23 @@ INDICATOR COMPUTATION:
 
 SIGNAL LOGIC:
 8. Use vectorized boolean expressions (with `&` or `|`) wrapped in parentheses — DO NOT use `and`/`or` (they crash with pandas Series).
+    Only compute indicators explicitly required by {strategy}, {buy_condition}, {sell_condition}.
+
+    If {buy_condition} includes "Golden Cross", compute and use golden_cross.
+
+    If {sell_condition} includes "Death Cross", compute and use death_cross.
+
+    If the user's query explicitly includes "stop-loss" (e.g., "stop-loss 5%"), then apply stop-loss check during sell execution per the STOP-LOSS section below. If not included in the user's query, DO NOT implement any stop-loss logic.
+
+    You don’t just paste raw code — you add it as a mandatory rule for computing Golden/Death Cross:
+
+    When strategy mentions "Golden Cross" or "Death Cross", compute as follows:
+        short_ma = df['Close'].rolling(window=short_window).mean().shift(1)
+        long_ma = df['Close'].rolling(window=long_window).mean().shift(1)
+        golden_cross = (short_ma.shift(1) <= long_ma.shift(1)) & (short_ma > long_ma)
+        death_cross = (short_ma.shift(1) >= long_ma.shift(1)) & (short_ma < long_ma)
+
+    Use `golden_cross` and `death_cross` as boolean Series for buy/sell signals.
 
 9. CLARIFY INDICATOR DEFINITIONS:
 - "50-day high" → compute using: `df['High'].rolling(window=50).max().shift(1)`
@@ -66,8 +93,18 @@ SIGNAL LOGIC:
 - "50-day SMA" or "SMA50" → compute using: `df['Close'].rolling(window=50).mean().shift(1)`
     ❌ DO NOT confuse "50-day high" with "50-day SMA"
 
-    STOP LOSS LOGIC:
-        Avoid comparing prices against signal arrays like buy_signals[i-1], as they may contain NaN or misaligned values. Instead, store the actual executed buy price in a separate variable (e.g., last_buy_price) when a position is opened. Use this variable to evaluate stop loss conditions (e.g., trigger sell if Close < stop_threshold * last_buy_price). Ensure this variable is reset (e.g., set to None) once the position is closed.
+STOP-LOSS (CONDITIONAL)
+- Implement stop-loss **ONLY IF the user's query explicitly mentions** stop-loss and provides the threshold (e.g., "stop-loss 5%").
+- If stop-loss is present:
+    - Follow these exact rules:
+        - When a buy is executed, store the executed buy price in `last_buy_price`.
+        - To trigger stop-loss: `if df['Close'].iloc[i] < last_buy_price * (1 - stop_loss_pct):` then trigger sell.
+        - Reset `last_buy_price = None` after position is closed.
+- If stop-loss is NOT present in the user's query, DO NOT create `last_buy_price`, `stop_loss_pct`, or any stop-loss checks.
+
+DURATION / CONSECUTIVE CONDITIONS (CONDITIONAL)
+- Implement consecutive-day counters (e.g., `below_sma_counter`) **ONLY IF the user's query explicitly asks** for a consecutive-day condition such as "for 3 consecutive days".
+- If the query requires consecutive-day logic, use the exact pattern described below; otherwise, DO NOT include counters or consecutive-day checks.
 
 10. For duration checks - if {duration_type} is consecutive: (e.g. RSI < 30 for 3 consecutive days), Use a counter to track how many consecutive days the condition is true.
      - Use a counter (e.g., `below_sma_counter = 0`) inside the loop to track how many **consecutive** days the price is below the SMA.
@@ -87,9 +124,35 @@ BUY/SELL EXECUTION RULES:
 11. Use `position_open` boolean to track trade state.
 12. Buy only if position is not open. Sell only if position is open.
 13. Signals must strictly alternate: buy → sell → buy. No consecutive buys/sells allowed.
+        Generate Buy/Sell signals strictly in a stateful manner:
+
+        Initialize in_position = False.
+
+        Loop over each date (or vectorized equivalent):
+
+        BUY Condition: If buy criteria are met and in_position == False, mark Buy, set in_position = True, store last_buy_price (only if stop-loss is requested).
+
+        SELL Condition: If sell criteria are met and in_position == True, mark Sell, set in_position = False.
+
+        Never generate a Sell without an active Buy (ignore Sell signals when in_position == False).
+
+        Ensure buy_signals and sell_signals arrays are aligned to this logic.
+
 14. Buy/sell only on the bar where the condition is triggered (i.e., at `iloc[i]`).
 15. Do NOT prefill Buy/Sell columns. Keep signals sparse (i.e., only trigger points marked).
 16. DO NOT forward fill signals.
+
+    - If position is open (Do not check stop-loss or death cross if strategy does not include them):
+    - Check stop-loss first (ONLY if stop-loss is part of the strategy and explicitly requested in the query):
+        if df['Close'].iloc[i] < last_buy_price * (1 - stop_loss_pct):
+            trigger sell
+    - Otherwise, check sell conditions:
+        - Only If "Death Cross" is part of the strategy:
+            if death_cross.iloc[i]:
+                trigger sell
+        - If other sell conditions are provided, evaluate them here.
+
+    - Ensure that a sell is triggered if ANY one of these conditions is met.
 
 ⚠️ INDEXING + ALIGNMENT RULES (STRICT):
 17. NEVER use the following (causes IndexError):
@@ -174,22 +237,123 @@ RETURNS & METRICS:
 
     Initialize all metric variables before conditionals to avoid NameError.
 
-PLOTTING (Plotly):
-24. Generate one plot per ticker using `plotly.graph_objects`.
-    - Always plot Close price (blue line)
-    - If present, plot Buy markers: green triangle-up at Close price
-    - If present, plot Sell markers: red triangle-down at Close price
-    - If moving averages are part of strategy:
-        - Compute with `.shift(1)`
-        - Plot them as dotted lines
-        - Use distinct colors (e.g., SMA20 = orange, SMA50 = purple)
+24. PLOTTING (Plotly) 
 
-25. Before plotting:
-    - Ensure buy_prices and sell_prices are not empty
-    - Do NOT plot if no trades
+    Create a 2-row subplot using plotly.subplots.make_subplots(rows=2, cols=1, shared_xaxes=True).
 
-26. Save plot using:
-    `fig.write_html(f"{ticker}_plot.html")`
+    Row 1 = Price chart with all indicators & Buy/Sell markers.
+
+    Row 2 = Equity curve (portfolio_value) as a continuous line.
+
+    Use specs=[[{{"secondary_y": True}}], [{{}}]] so Row 1 supports a secondary y-axis.
+
+    Price + Indicators + Buy/Sell Markers (Row 1):
+
+    Always plot Close price as a blue line on the primary y-axis (secondary_y=False).
+
+    Only plot Buy markers where buy_signals is True.
+
+    Only plot Sell markers where sell_signals is True and preceded by a Buy.
+
+    Ensure no consecutive Sell markers appear without an intervening Buy.
+
+    Plot all indicators referenced in the strategy:
+
+    SMA/MAs:
+
+        Compute using .shift(1) to prevent lookahead bias.
+
+        Plot each SMA as a dotted line with distinct colors (e.g., SMA10 = orange, SMA30 = purple).
+
+        Ensure SMAs always appear even if there are no trades.
+
+    MACD, Signal Line, RSI thresholds, etc. (if applicable): plot on secondary y-axis (secondary_y=True).
+
+    Plot Buy markers as green triangle-up markers at the Close price.
+
+    Plot Sell markers as red triangle-down markers at the Close price.
+
+    Equity Curve (Row 2):
+
+    Assume starting capital = 100,000 (100K).
+
+    All-in/all-out trading logic:
+
+        On a Buy signal: invest full cash balance to buy as many shares as possible.
+
+        On a Sell signal: liquidate all shares into cash.
+
+    Daily portfolio value calculation (continuous):
+
+        Initialize portfolio_value as a pandas Series indexed by all dates in ticker_data.
+
+        Loop through each date in order, updating:
+
+            - If holding shares: portfolio_value[date] = shares * Close[date] + cash_balance
+
+            - If no position: portfolio_value[date] = cash_balance
+
+        Do NOT update only on Buy/Sell dates—update for every date so value tracks daily market movements.
+
+        After processing all dates, forward-fill NaN values (if any gaps remain).
+
+        Plot this portfolio_value as a continuous purple line in Row 2.
+
+    Layout & Axis Configuration:
+
+        Ensure ticker_data.index is a DatetimeIndex.
+
+        Use x=ticker_data.index for all traces (Close, indicators, buy/sell markers, portfolio_value).
+
+        Set fig.update_layout(xaxis=dict(type='date')) for proper date alignment.
+
+    In Row 1:
+
+        Set Close Price axis: fig.update_yaxes(title_text="Price", row=1, col=1, secondary_y=False).
+
+        Set Indicators axis: fig.update_yaxes(title_text="Indicator", row=1, col=1, secondary_y=True).
+
+        Keep y-axis ranges independent between Price and Indicators.
+
+        Trade Presence Check (Before Plotting):
+
+            If no valid Buy-Sell pairs exist (i.e., sum(buy_signals) == 0 or sum(sell_signals) == 0), skip plotting trade markers.
+    
+    IMPORTANT: Ensure the backtest plot is clear and aligned:
+
+        - Use make_subplots with secondary_y=True for RSI and other indicators. Do not manually set yaxis='y2'.
+
+        - Plot buy/sell markers only at valid non-NaN signal points using their exact index positions.
+
+        - Initialize portfolio value as NaN except for the starting capital, update dynamically during trades, and forward-fill only at the end.
+
+        - Align Close Price, SMA, RSI, buy/sell markers, and portfolio value on the same date index throughout the backtest date range.
+
+        - Set xaxis=dict(type='date') in layout to ensure proper time-series plotting.
+
+    Save Final Combined Plot:
+
+        Save the complete figure with:
+
+        fig.write_html(f"{ticker}_plot.html")
+
+        Ensure both subplots appear in one file, vertically stacked.
+
+26. When using the ta library for MACD:
+
+    Use MACD(data['Close']) to create the MACD object.
+
+    Use macd.macd() for the MACD line.
+
+    Use macd.macd_signal() for the signal line (not macd.signal()).
+
+    Use macd.macd_diff() for the histogram.
+
+    Always .shift(1) MACD and signal values to avoid look-ahead bias.
+
+    Ensure buy condition is MACD crosses above MACD Signal when no open position.
+
+    Ensure sell condition is MACD crosses below MACD Signal only if a position is open.
 
 FINAL OUTPUT:
 27. Append all per-ticker metrics to a summary list and save as:
@@ -208,7 +372,7 @@ ADDITIONAL:
 35. Ensure reproducible structure — keep all per-ticker logic inside the loop
 36. All extracted price series must have inherited datetime index from `ticker_data` — do NOT reindex manually
 
-"""            
+"""           
     print(prompt)
     messages = [
         SystemMessage(content="Write simple python code. Do not use yfinance. VERY IMP: DO NOT include'''python. '''python causes code to break. Required data is stored in SQLite3 table provided in the query. Use the ta library, importing MACD from ta.trend and RSI from ta.momentum if needed. Initialize ta class."\
