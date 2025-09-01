@@ -44,9 +44,11 @@ def interpret_query(query: str) -> dict:
     }}
     
     Please return a JSON object containing the following:
-    - "ticker": The stock ticker symbol not the company name (e.g., TCS). Try to find the ticker symbol for each company name mentioned in the query. If multiple companies are mentioned, return all ticker symbols in a list.
-    - "ticker": if there are multiple company/stock names mentioned then get the ticker name of all and return ticker names in a list.
-    - "strategy": The name of the strategy (e.g., RSI)
+ - "ticker": Identify the Company names given in the query. Do not return ticker symbols. Just return the company names as mentioned in the query. 
+    + "ticker": Identify and normalize company names into their official names as listed on stock exchanges. 
+    + If there are multiple companies mentioned, return a list of names.
+    + Expand abbreviations (e.g., L&T → Larsen & Toubro, HDFC → Housing Development Finance Corporation). 
+    + If the user adds a country suffix like "India", drop it when returning the canonical name.   - "strategy": The name of the strategy (e.g., RSI)
     - "buy_condition": A dictionary with 'buy' conditions for the strategy (e.g., buy: RSI: <25, sell: RSI: >75)
     - "sell_condition": A dictionary with 'sell' conditions for the strategy (e.g., buy: RSI: <25, sell: RSI: >75)
     - "start_date": Use today's date={today} for reference for date calculations. This should be a date value. Interpret and calculate based on query what is the start date of range for which data is needed.

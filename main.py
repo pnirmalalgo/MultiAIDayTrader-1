@@ -9,6 +9,7 @@ import yfinance as yf
 import requests
 from dotenv import load_dotenv
 from typing import TypedDict
+import urllib.parse
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +21,7 @@ from celery.result import AsyncResult
 from agents.interpreter import interpret_query
 from agents.codegen import generate_code
 from agents.code_cleaner import clean_code
+from agents.ticker_lookup import resolve_ticker
 from langgraph.graph import StateGraph, END
 
 # Import Celery app and task
@@ -56,8 +58,15 @@ def save_dataframe_to_sqlite(df, db_name='market_data.db', table_name='stock_dat
 def fetch_fmp_single_ticker(tkr, ticker_try, start_date, end_date):
     load_dotenv()
     FMP_API_KEY = os.getenv("FMP_API_KEY")
-    url = f"https://financialmodelingprep.com/api/v3/historical-price-full/{ticker_try}?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
-    resp = requests.get(url)
+    FMP_BASE_URL ="https://financialmodelingprep.com/api/v3"
+    url = f"{FMP_BASE_URL}/historical-price-full/{urllib.parse.quote(ticker_try)}"
+    params = {
+        "from": start_date,
+        "to": end_date,
+        "apikey": FMP_API_KEY
+    }
+
+    resp = requests.get(url, params=params)
     if resp.status_code != 200:
         print(f"HTTP Error {resp.status_code} for {ticker_try}")
         return pd.DataFrame()
@@ -77,6 +86,7 @@ def fetch_fmp_single_ticker(tkr, ticker_try, start_date, end_date):
     keep_cols = [c for c in ["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"] if c in df.columns]
     df = df[keep_cols]
     df["Ticker"] = tkr
+    print("data:", df)
     return df
 
 def get_fmp_stock_data(tickers, start_date, end_date):
@@ -112,17 +122,36 @@ def node_interpreter(state):
     user_input = state["input"]
     return interpret_query(user_input)
 
+def node_ticker_lookup(state):
+    """Resolve company names to tickers using external API."""
+    try:
+        intent_json = state["intent"].replace("```json\n", "").replace("\n```", "")
+        parsed = json.loads(intent_json)
+
+        # Assume parsed["ticker"] might be a company name
+        ticker_or_company = parsed["ticker"]
+
+        resolved = resolve_ticker(ticker_or_company)  # call your lookup agent
+        parsed["ticker"] = resolved  # replace with actual ticker(s)
+
+        return {"intent": json.dumps(parsed)}
+    except Exception as e:
+        return {"intent": state["intent"], "error": str(e)}
+
+
 def node_codegen(state):
     cleaned_content = state["intent"].replace("```json\n", "").replace("\n```", "")
     parsed_query = json.loads(cleaned_content)
-    ticker = parsed_query["ticker"]
+
+    tickers = parsed_query["ticker"]  
+    #ticker = parsed_query["ticker"]
     start_date = parsed_query["start_date"]
     end_date = parsed_query["end_date"]
     buy_condition = parsed_query["buy_condition"]
     sell_condition = parsed_query["sell_condition"]
 
     # Fetch stock data
-    stock_data = get_fmp_stock_data(ticker, start_date, end_date)
+    stock_data = get_fmp_stock_data(tickers, start_date, end_date)
     return generate_code(cleaned_content, stock_data)
 
 def node_cleaner(state):
@@ -137,12 +166,14 @@ def node_executor(state):
 # -----------------------------
 builder = StateGraph(GraphState)
 builder.add_node("interpreter", node_interpreter)
+builder.add_node("ticker_lookup", node_ticker_lookup)   # NEW
 builder.add_node("codegen", node_codegen)
 builder.add_node("code_cleaner", node_cleaner)
 builder.add_node("executor", node_executor)
 
 builder.set_entry_point("interpreter")
-builder.add_edge("interpreter", "codegen")
+builder.add_edge("interpreter", "ticker_lookup")        # interpreter → ticker_lookup
+builder.add_edge("ticker_lookup", "codegen")            # ticker_lookup → codegen
 builder.add_edge("codegen", "code_cleaner")
 builder.add_edge("code_cleaner", "executor")
 builder.add_edge("executor", END)
@@ -164,6 +195,7 @@ fastapi_app.add_middleware(
 
 @fastapi_app.post("/api/submit-query")
 async def submit_query(req: QueryRequest):
+    
     final = langgraph_app.invoke({"input": req.query})
     execution_result = final["execution_result"]
     task_id = execution_result.split(":")[-1].strip()

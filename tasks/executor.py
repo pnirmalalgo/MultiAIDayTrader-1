@@ -17,6 +17,7 @@ os.makedirs(SCRIPT_DIR, exist_ok=True)
 
 @app.task
 def run_python_code(code: str):
+    print('here')
     # save to persistent folder
     filename = os.path.join(SCRIPT_DIR, f"code_{uuid.uuid4().hex}.py")
 
