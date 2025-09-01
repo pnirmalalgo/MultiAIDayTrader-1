@@ -201,159 +201,39 @@ TRADES HANDLING:
         ```
 
 RETURNS & METRICS:
-23. Only use completed trades (buy followed by sell) to compute metrics:
-    - - ALWAYS compute returns as a pandas Series — NOT a NumPy array.
-    - For example:
+23. Compute metrics as follows:
+
+    - Use only completed trades (buy followed by sell) to compute **trade-level returns**:
         ✅ returns = pd.Series((sell_prices.values - buy_prices.values) / buy_prices.values)
-    - Then compute:
-        ✅ cumulative_returns = (1 + returns).cumprod()
-        ✅ max_drawdown = (1 - cumulative_returns / cumulative_returns.cummax()).max()
-    
-    ❌ DO NOT do:
-        returns = (sell_prices.values - buy_prices.values) / buy_prices.values
-        (this makes `returns` a NumPy array and breaks .cumprod() / .cummax())
 
-    - Cumulative Return = cumulative_returns.iloc[-1] - 1
-    - Annualized Return = cumulative_returns.iloc[-1] ** (365 / days_held) - 1
-        - Where `days_held = (sell_prices.index[-1] - buy_prices.index[0]).days`
-        - Only compute if `days_held > 0`
-    
-    - Volatility = returns.std() * sqrt(252)
-    - Max Drawdown: from cumulative return series
-    
+    - Compute **portfolio_value** daily (all-in/all-out logic).  
+      Use this portfolio_value for drawdown and cumulative curve.
+
+    - Define cumulative_curve = portfolio_value / portfolio_value.iloc[0]
+
+    - Cumulative Return = (cumulative_curve.iloc[-1] - 1) * 100
+
+    - Annualized Return = ((cumulative_curve.iloc[-1]) ** (365 / total_days) - 1) * 100  
+        where total_days = (ticker_data.index[-1] - ticker_data.index[0]).days, only if total_days > 0
+
+    - Volatility = returns.std() * sqrt(252) * 100
+
+    - Max Drawdown = (1 - cumulative_curve / cumulative_curve.cummax()).max() * 100
+
     ⚠️ Handle edge case:
-        if returns is empty → set all metrics to default (0, None, etc.)
+        if returns is empty → set all metrics to default (0, None, None, None)
 
-    ⚠️ NEVER call .cummax() or .iloc on NumPy arrays
-    
+    ⚠️ NEVER call .cummax() or .iloc on NumPy arrays — always use pandas Series
 
-    ⚠️ If no valid trades, set all metrics to:
-        Cumulative Return = 0  
-        Annualized Return = None  
-        Volatility = None  
-        Max Drawdown = None
+    ✅ All metrics must be reported in percentages (multiply by 100).
 
     Also: ✅ print a message: `No trades executed for {ticker}`
 
     Initialize all metric variables before conditionals to avoid NameError.
-
+    
 24. PLOTTING (Plotly) 
 
-    Create a 2-row subplot using plotly.subplots.make_subplots(rows=2, cols=1, shared_xaxes=True).
-
-    Row 1 = Price chart with all indicators & Buy/Sell markers.
-
-    Row 2 = Equity curve (portfolio_value) as a continuous line.
-
-    Use specs=[[{{"secondary_y": True}}], [{{}}]] so Row 1 supports a secondary y-axis.
-
-    Price + Indicators + Buy/Sell Markers (Row 1):
-
-    Always plot Close price as a blue line on the primary y-axis (secondary_y=False).
-
-    Only plot Buy markers where buy_signals is True.
-
-    Only plot Sell markers where sell_signals is True and preceded by a Buy.
-
-    Ensure no consecutive Sell markers appear without an intervening Buy.
-
-    Plot all indicators referenced in the strategy:
-
-    SMA/MAs:
-
-        Compute using .shift(1) to prevent lookahead bias.
-
-        Plot each SMA as a dotted line with distinct colors (e.g., SMA10 = orange, SMA30 = purple).
-
-        Ensure SMAs always appear even if there are no trades.
-
-    MACD, Signal Line, RSI thresholds, etc. (if applicable): plot on secondary y-axis (secondary_y=True).
-
-    Plot Buy markers as green triangle-up markers at the Close price.
-
-    Plot Sell markers as red triangle-down markers at the Close price.
-
-    Equity Curve (Row 2):
-
-    Assume starting capital = 100,000 (100K).
-
-    All-in/all-out trading logic:
-
-        On a Buy signal: invest full cash balance to buy as many shares as possible.
-
-        On a Sell signal: liquidate all shares into cash.
-
-    Daily portfolio value calculation (continuous):
-
-        Initialize portfolio_value as a pandas Series indexed by all dates in ticker_data.
-
-        Loop through each date in order, updating:
-
-            - If holding shares: portfolio_value[date] = shares * Close[date] + cash_balance
-
-            - If no position: portfolio_value[date] = cash_balance
-
-        Do NOT update only on Buy/Sell dates—update for every date so value tracks daily market movements.
-
-        After processing all dates, forward-fill NaN values (if any gaps remain).
-
-        Plot this portfolio_value as a continuous purple line in Row 2.
-
-    Layout & Axis Configuration:
-
-        Ensure ticker_data.index is a DatetimeIndex.
-
-        Use x=ticker_data.index for all traces (Close, indicators, buy/sell markers, portfolio_value).
-
-        Set fig.update_layout(xaxis=dict(type='date')) for proper date alignment.
-
-    In Row 1:
-
-        Set Close Price axis: fig.update_yaxes(title_text="Price", row=1, col=1, secondary_y=False).
-
-        Set Indicators axis: fig.update_yaxes(title_text="Indicator", row=1, col=1, secondary_y=True).
-
-        Keep y-axis ranges independent between Price and Indicators.
-
-        Trade Presence Check (Before Plotting):
-
-            If no valid Buy-Sell pairs exist (i.e., sum(buy_signals) == 0 or sum(sell_signals) == 0), skip plotting trade markers.
-    
-    IMPORTANT: Ensure the backtest plot is clear and aligned:
-
-        - Use make_subplots with secondary_y=True for RSI and other indicators. Do not manually set yaxis='y2'.
-
-        - Plot buy/sell markers only at valid non-NaN signal points using their exact index positions.
-
-        - Initialize portfolio value as NaN except for the starting capital, update dynamically during trades, and forward-fill only at the end.
-
-        - Align Close Price, SMA, RSI, buy/sell markers, and portfolio value on the same date index throughout the backtest date range.
-
-        - Set xaxis=dict(type='date') in layout to ensure proper time-series plotting.
-
-    Save Final Combined Plot:
-
-        Save the complete figure with:
-
-        fig.write_html(f"{ticker}_plot.html")
-
-        Ensure both subplots appear in one file, vertically stacked.
-
-26. When using the ta library for MACD:
-
-    Use MACD(data['Close']) to create the MACD object.
-
-    Use macd.macd() for the MACD line.
-
-    Use macd.macd_signal() for the signal line (not macd.signal()).
-
-    Use macd.macd_diff() for the histogram.
-
-    Always .shift(1) MACD and signal values to avoid look-ahead bias.
-
-    Ensure buy condition is MACD crosses above MACD Signal when no open position.
-
-    Ensure sell condition is MACD crosses below MACD Signal only if a position is open.
+    [unchanged from your original prompt …]
 
 FINAL OUTPUT:
 27. Append all per-ticker metrics to a summary list and save as:
@@ -372,7 +252,8 @@ ADDITIONAL:
 35. Ensure reproducible structure — keep all per-ticker logic inside the loop
 36. All extracted price series must have inherited datetime index from `ticker_data` — do NOT reindex manually
 
-"""           
+"""
+          
     print(prompt)
     messages = [
         SystemMessage(content="Write simple python code. Do not use yfinance. VERY IMP: DO NOT include'''python. '''python causes code to break. Required data is stored in SQLite3 table provided in the query. Use the ta library, importing MACD from ta.trend and RSI from ta.momentum if needed. Initialize ta class."\

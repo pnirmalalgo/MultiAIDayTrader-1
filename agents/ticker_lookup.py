@@ -1,34 +1,50 @@
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import SystemMessage, HumanMessage
-import json
-
-from dotenv import load_dotenv
+import requests
 import os
+from dotenv import load_dotenv
 
-# Load environment variables from .env file
 load_dotenv()
+FMP_API_KEY = os.getenv("FMP_API_KEY")
+FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
 
-# Access the API key
-api_key = os.getenv("OPENAI_API_KEY")
+def resolve_ticker(company_names):
+    """
+    Resolve one or multiple company names into a list of ticker symbols.
+    Always returns a list of strings (tickers).
+    """
+    print(f"Resolving tickers for: {company_names}")
+    if isinstance(company_names, str):
+        company_names = [company_names]
+    elif not isinstance(company_names, list):
+        raise ValueError("company_names must be a string or list of strings")
 
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, openai_api_key=api_key)
+    tickers = []
+    for name in company_names:
+        try:
+            resp = requests.get(
+                f"{FMP_BASE_URL}/search",
+                params={"query": name, "apikey": FMP_API_KEY}
+            )
+            resp.raise_for_status()
+            results = resp.json()
+            if results:
+                # Try to find NSE first
+                nse_match = next((r for r in results if r.get("exchangeShortName") == "NSE"), None)
+                if nse_match:
+                    tickers.append(nse_match["symbol"])
+                    continue
 
+                # Try to find BSE next
+                bse_match = next((r for r in results if r.get("exchangeShortName") == "BSE"), None)
+                if bse_match:
+                    tickers.append(bse_match["symbol"])
+                    continue
 
-def resolve_ticker(intent_json: str) -> dict:
-    parsed = json.loads(intent_json)
-    company_name = parsed.get("company_name")
+                # Fallback: just take the first result
+                tickers.append(results[0]["symbol"])
+            else:
+                print(f"⚠️ No ticker found for {name}")
+        except Exception as e:
+            print(f"❌ Error resolving {name}: {e}")
 
-    if not company_name:
-        return {"intent": intent_json}
-
-    messages = [
-        SystemMessage(
-            content="You are a stock market assistant. Given a company name, return the stock ticker (including exchange suffix like .NS or .NYSE if known). Only return the ticker string."
-        ),
-        HumanMessage(content=company_name)
-    ]
-
-    response = llm.invoke(messages)
-    parsed["ticker"] = response.content.strip().upper()
-
-    return {"intent": json.dumps(parsed)}
+    print(f"Resolved tickers: {tickers}")
+    return tickers
