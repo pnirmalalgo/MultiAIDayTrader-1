@@ -32,227 +32,336 @@ def generate_code(intent_json: str, stock_data: pd.DataFrame) -> dict:
     prompt = f"""
 Write Python code to implement the following stock trading strategy.
 
-Ensure the output is ONLY executable Python code — no comments, no markdown, no `pip install`, and NO code fences like ```python.
+Ensure the output is ONLY executable Python code — no comments, no markdown, no pip install, and NO code fences like ```python.
 
 ##############################
-# GLOBAL ENFORCEMENT (READ FIRST)
+
+GLOBAL ENFORCEMENT (READ FIRST)
+
 ##############################
-⚠️ VERY IMPORTANT: Implement **only** the logic that is explicitly required by the given {strategy}, {buy_condition}, {sell_condition}, and any explicit {duration_type} or stop-loss clauses in the user's query.
-- If the user's query does NOT mention stop-loss, consecutive-day duration, or any other extra constraint, DO NOT add that logic in the produced code.
-- Do NOT invent stop-loss, consecutive-day counters, or any other “helpful” features unless they are explicitly present in the provided strategy/buy/sell/duration inputs.
-- The code must be minimal and strictly focused on the requested strategy.
+⚠️ VERY IMPORTANT: Implement only the logic that is explicitly required by the given {strategy}, {buy_condition}, {sell_condition}, and any explicit {duration_type} or stop-loss clauses in the user's query.
 
-GENERAL SETUP:
-1. Use only `pandas` and `ta` (assume pre-installed).
-2. Do NOT fetch data from yfinance or APIs.
-3. Use `sqlite3` and `pandas.read_sql()` to load data from `market_data.db`, table: `stock_data`.
-    - Columns: 'Open', 'High', 'Low', 'Close', 'Volume', 'Ticker', 'Date'
-    - Sort data by ascending `Date`
+If the user's query does NOT mention stop-loss, consecutive-day duration, or any other extra constraint, DO NOT add that logic in the produced code.
 
-4. Multi-Ticker Logic:
-    - Filter and process each ticker individually using a for-loop.
-    - If there’s only one ticker, treat it as a special case of multi-ticker logic — the code should still loop over unique tickers.
-    - Save one plot per ticker (`{ticker}_plot.html`) and append summary metrics for each ticker in a file named `trading_results.html`.
+Do NOT invent stop-loss, consecutive-day counters, or any other “helpful” features unless they are explicitly present in the provided strategy/buy/sell/duration inputs.
 
-STRATEGY INPUTS:
+The code must be minimal and strictly focused on the requested strategy.
+
+##############################
+
+GENERAL SETUP
+
+##############################
+
+Use only pandas and ta (assume pre-installed).
+
+Do NOT fetch data from yfinance or other APIs.
+
+Use sqlite3 and pandas.read_sql() to load data from market_data.db, table: stock_data.
+
+Expected columns: 'Open', 'High', 'Low', 'Close', 'Volume', 'Ticker', 'Date'
+
+Parse Date to datetime and sort ascending by Date.
+
+Multi-Ticker Logic:
+
+Filter and process each ticker individually using a for-loop over unique tickers.
+
+If there’s only one ticker, still loop over the single unique ticker.
+
+Save one plot per ticker as {ticker}_plot.html.
+
+Append per-ticker summary metrics to a list and save them all to trading_results.html.
+
+##############################
+
+STRATEGY INPUTS
+
+##############################
 5. Strategy is passed as:
-    Strategy: {strategy}
-    Buy Condition: {buy_condition}
-    Sell Condition: {sell_condition}
-    Duration: {duration_type}        # (if present; otherwise empty/None)
-    
+Strategy: {strategy}
+Buy Condition: {buy_condition}
+Sell Condition: {sell_condition}
+Duration: {duration_type} # (if present; otherwise empty/None)
 
-INDICATOR COMPUTATION:
-6. Compute only indicators mentioned in the strategy. Example: if SMA20 and SMA50 are required, compute them using `.shift(1)` to avoid lookahead bias.
-7. For turning points like “macd turns positive”, detect sign change:
-    Example: `(macd[i-1] < 0) & (macd[i] > 0)`
+##############################
 
-SIGNAL LOGIC:
-8. Use vectorized boolean expressions (with `&` or `|`) wrapped in parentheses — DO NOT use `and`/`or` (they crash with pandas Series).
-    Only compute indicators explicitly required by {strategy}, {buy_condition}, {sell_condition}.
+INDICATOR COMPUTATION
 
-    If {buy_condition} includes "Golden Cross", compute and use golden_cross.
+##############################
+6. Compute only indicators explicitly mentioned by the strategy/buy/sell inputs.
 
-    If {sell_condition} includes "Death Cross", compute and use death_cross.
+Moving averages (e.g., SMA, EMA) must be computed with .shift(1) to avoid lookahead bias.
 
-    If the user's query explicitly includes "stop-loss" (e.g., "stop-loss 5%"), then apply stop-loss check during sell execution per the STOP-LOSS section below. If not included in the user's query, DO NOT implement any stop-loss logic.
+RSI MUST be computed directly from Close without any shift.
 
-    You don’t just paste raw code — you add it as a mandatory rule for computing Golden/Death Cross:
+MACD and other indicators should be computed only if requested.
 
-    When strategy mentions "Golden Cross" or "Death Cross", compute as follows:
-        short_ma = df['Close'].rolling(window=short_window).mean().shift(1)
-        long_ma = df['Close'].rolling(window=long_window).mean().shift(1)
-        golden_cross = (short_ma.shift(1) <= long_ma.shift(1)) & (short_ma > long_ma)
-        death_cross = (short_ma.shift(1) >= long_ma.shift(1)) & (short_ma < long_ma)
+Turning points/sign changes (if requested), detect using prior/cur values, e.g.:
+(series.shift(1) < 0) & (series > 0).
 
-    Use `golden_cross` and `death_cross` as boolean Series for buy/sell signals.
+Golden/Death Cross (only if explicitly referenced):
 
-9. CLARIFY INDICATOR DEFINITIONS:
-- "50-day high" → compute using: `df['High'].rolling(window=50).max().shift(1)`
-    ✅ Represents breakout above recent 50-day price high
-- "50-day SMA" or "SMA50" → compute using: `df['Close'].rolling(window=50).mean().shift(1)`
-    ❌ DO NOT confuse "50-day high" with "50-day SMA"
+short_ma = df['Close'].rolling(window=short_window).mean().shift(1)
+long_ma  = df['Close'].rolling(window=long_window).mean().shift(1)
+golden_cross = (short_ma.shift(1) <= long_ma.shift(1)) & (short_ma > long_ma)
+death_cross  = (short_ma.shift(1) >= long_ma.shift(1)) & (short_ma < long_ma)
 
-STOP-LOSS (CONDITIONAL)
-- Implement stop-loss **ONLY IF the user's query explicitly mentions** stop-loss and provides the threshold (e.g., "stop-loss 5%").
-- If stop-loss is present:
-    - Follow these exact rules:
-        - When a buy is executed, store the executed buy price in `last_buy_price`.
-        - To trigger stop-loss: `if df['Close'].iloc[i] < last_buy_price * (1 - stop_loss_pct):` then trigger sell.
-        - Reset `last_buy_price = None` after position is closed.
-- If stop-loss is NOT present in the user's query, DO NOT create `last_buy_price`, `stop_loss_pct`, or any stop-loss checks.
+Use these boolean Series for buy/sell when asked.
 
-DURATION / CONSECUTIVE CONDITIONS (CONDITIONAL)
-- Implement consecutive-day counters (e.g., `below_sma_counter`) **ONLY IF the user's query explicitly asks** for a consecutive-day condition such as "for 3 consecutive days".
-- If the query requires consecutive-day logic, use the exact pattern described below; otherwise, DO NOT include counters or consecutive-day checks.
+CLARIFY INDICATOR DEFINITIONS:
 
-10. For duration checks - if {duration_type} is consecutive: (e.g. RSI < 30 for 3 consecutive days), Use a counter to track how many consecutive days the condition is true.
-     - Use a counter (e.g., `below_sma_counter = 0`) inside the loop to track how many **consecutive** days the price is below the SMA.
-        - Reset the counter to 0 if the condition breaks
-        - Only trigger the buy signal if counter >= {duration_days}
+"50-day high" → df['High'].rolling(50).max().shift(1)
 
-    Example:
-        if close[i] < sma[i]:
-            below_sma_counter += 1
-        else:
-            below_sma_counter = 0
+"50-day SMA" → df['Close'].rolling(50).mean().shift(1)
 
-        if rsi[i] < 25 and below_sma_counter >= 3:
-            # trigger buy
+Do NOT confuse highs with moving averages.
 
-BUY/SELL EXECUTION RULES:
-11. Use `position_open` boolean to track trade state.
-12. Buy only if position is not open. Sell only if position is open.
-13. Signals must strictly alternate: buy → sell → buy. No consecutive buys/sells allowed.
-        Generate Buy/Sell signals strictly in a stateful manner:
+##############################
 
-        Initialize in_position = False.
+STOP-LOSS (ONLY IF REQUESTED)
 
-        Loop over each date (or vectorized equivalent):
+##############################
 
-        BUY Condition: If buy criteria are met and in_position == False, mark Buy, set in_position = True, store last_buy_price (only if stop-loss is requested).
+Implement stop-loss ONLY IF the user's query explicitly mentions it (e.g., "stop-loss 5%").
 
-        SELL Condition: If sell criteria are met and in_position == True, mark Sell, set in_position = False.
+If present:
 
-        Never generate a Sell without an active Buy (ignore Sell signals when in_position == False).
+Store executed buy price in last_buy_price on entry.
 
-        Ensure buy_signals and sell_signals arrays are aligned to this logic.
+Trigger stop-loss if df['Close'].iloc[i] < last_buy_price * (1 - stop_loss_pct).
 
-14. Buy/sell only on the bar where the condition is triggered (i.e., at `iloc[i]`).
-15. Do NOT prefill Buy/Sell columns. Keep signals sparse (i.e., only trigger points marked).
-16. DO NOT forward fill signals.
+Reset last_buy_price = None after closing the position.
 
-    - If position is open (Do not check stop-loss or death cross if strategy does not include them):
-    - Check stop-loss first (ONLY if stop-loss is part of the strategy and explicitly requested in the query):
-        if df['Close'].iloc[i] < last_buy_price * (1 - stop_loss_pct):
-            trigger sell
-    - Otherwise, check sell conditions:
-        - Only If "Death Cross" is part of the strategy:
-            if death_cross.iloc[i]:
-                trigger sell
-        - If other sell conditions are provided, evaluate them here.
+If not present in the query, do not create stop-loss variables or checks.
 
-    - Ensure that a sell is triggered if ANY one of these conditions is met.
+##############################
 
-⚠️ INDEXING + ALIGNMENT RULES (STRICT):
-17. NEVER use the following (causes IndexError):
-        ❌ buy_prices.index = ticker_data.index[buy_prices.index]
-        ❌ sell_prices.index = ticker_data.index[sell_prices.index]
-        ❌ buy_prices.index = data.index[buy_prices.index]
-    
-    CRITICAL DATE ALIGNMENT RULES:
+DURATION / CONSECUTIVE CONDITIONS (ONLY IF REQUESTED)
 
-    - After filtering the data for each ticker, set the 'Date' column as the index:
-        ticker_data.set_index('Date', inplace=True)
+##############################
+10. Implement consecutive-day counters only if the query asks for them (e.g., "for 3 consecutive days").
+- Use a counter pattern inside the loop:
+- Increment when condition holds, reset to 0 when it breaks.
+- Fire the signal only when the counter >= required days.
 
-    - This ensures that any extracted Series (e.g., buy_prices, sell_prices) inherit a proper DatetimeIndex.
+##############################
 
-    - ONLY if 'Date' is the index:
-        ✅ days_held = (sell_prices.index[-1] - buy_prices.index[0]).days
+SIGNAL LOGIC
 
-    - ❌ If 'Date' is just a column and not set as the index, buy_prices.index will be integers (0, 1, ...) — and date math will crash with:
-            AttributeError: 'numpy.int64' object has no attribute 'days'
+##############################
+11. Use vectorized pandas boolean expressions (&, |) wrapped in parentheses when possible. Do not use Python and/or on pandas Series.
 
-    - Therefore, always call:
-        ticker_data.set_index('Date', inplace=True)
-        immediately after parsing 'Date' with pd.to_datetime
+State handling:
 
-18. ✅ Buy/Sell prices extracted via `.dropna()` already have correct datetime index — NEVER modify or reassign their index manually.
+Maintain in_position boolean.
 
-19. ❌ DO NOT try to reindex anything using `.index[...]` unless it's a boolean mask or integer position. Doing so will crash the code with "arrays used as indices must be of integer or boolean type".
+Buy only if in_position == False and the buy condition is met.
 
-20. DO NOT reset index on any filtered price series (e.g., trades, buy_prices, sell_prices). Keep the inherited datetime index.
+Sell only if in_position == True and the sell condition is met.
 
-21. Buy/sell signals must be stored as new columns in `ticker_data`:
-    ✅ Example:
-        ticker_data['Buy'] = buy_signals
-        ticker_data['Sell'] = sell_signals
+Signals must alternate strictly: buy → sell → buy. Ignore sells with no open position.
 
-TRADES HANDLING:
-22. Create `trades = ticker_data[['Buy', 'Sell']]`, then:
-    - Use `.dropna(how='all')` to filter rows with any signal.
-    - Extract `buy_prices = trades['Buy'].dropna()`
-    - Extract `sell_prices = trades['Sell'].dropna()`
-    - Truncate longer list:
-        ```python
-        min_len = min(len(buy_prices), len(sell_prices))
-        buy_prices = buy_prices.iloc[:min_len]
-        sell_prices = sell_prices.iloc[:min_len]
-        ```
+Mark signals at the exact bar/time they trigger (use the current index position).
 
-RETURNS & METRICS:
-23. Compute metrics as follows:
+Keep signals sparse:
 
-    - Use only completed trades (buy followed by sell) to compute **trade-level returns**:
-        ✅ returns = pd.Series((sell_prices.values - buy_prices.values) / buy_prices.values)
+Do NOT forward-fill buy/sell columns.
 
-    - Compute **portfolio_value** daily (all-in/all-out logic).  
-      Use this portfolio_value for drawdown and cumulative curve.
+Store signals in new columns: ticker_data['Buy'], ticker_data['Sell'] containing prices at signal bars and NaN elsewhere.
 
-    - Define cumulative_curve = portfolio_value / portfolio_value.iloc[0]
+- When constructing daily portfolio_value, check buy and sell signals independently for each date:
+    - Do NOT use `elif` between buy and sell.
+    - For each date d:
+        if d in buy_prices.index: execute buy
+        if d in sell_prices.index: execute sell
+    - This ensures same-day buy and sell are both processed if strategy allows.
 
-    - Cumulative Return = (cumulative_curve.iloc[-1] - 1) * 100
+- Only When handling Bollinger Bands:
 
-    - Annualized Return = ((cumulative_curve.iloc[-1]) ** (365 / total_days) - 1) * 100  
-        where total_days = (ticker_data.index[-1] - ticker_data.index[0]).days, only if total_days > 0
+    - Buy if in_position == False and Close <= lower_band (and any other conditions like RSI < 30)
+    - Sell if in_position == True and Close >= upper_band
+##############################
 
-    - Volatility = returns.std() * sqrt(252) * 100
+INDEXING + ALIGNMENT RULES (STRICT)
 
-    - Max Drawdown = (1 - cumulative_curve / cumulative_curve.cummax()).max() * 100
+##############################
+14. Immediately after parsing Date, set it as the index for each filtered ticker:
+ticker_data.set_index('Date', inplace=True)
+Ensure the index is a DatetimeIndex.
 
-    ⚠️ Handle edge case:
-        if returns is empty → set all metrics to default (0, None, None, None)
+Do not manually reassign indices for buy_prices/sell_prices. The .dropna() extracts preserve the DatetimeIndex.
 
-    ⚠️ NEVER call .cummax() or .iloc on NumPy arrays — always use pandas Series
+Do not use index slicing like series.index[...] unless it is a boolean mask or integer positions. Do not reindex trades. Do not reset index on these extracted Series.
 
-    ✅ All metrics must be reported in percentages (multiply by 100).
+Date math (for days differences) must only be done when index is a DatetimeIndex.
 
-    Also: ✅ print a message: `No trades executed for {ticker}`
+##############################
 
-    Initialize all metric variables before conditionals to avoid NameError.
-    
-24. PLOTTING (Plotly) 
+Bollinger Bands:
 
-    [unchanged from your original prompt …]
+If the strategy/buy/sell conditions reference Bollinger Bands, compute them using ta.volatility.BollingerBands on Close:
 
-FINAL OUTPUT:
-27. Append all per-ticker metrics to a summary list and save as:
-    `trading_results.html` using `DataFrame.to_html(index=False)`
+- lower_band = BollingerBands(df['Close']).bollinger_lband()
+- upper_band = BollingerBands(df['Close']).bollinger_hband()
+- middle_band = BollingerBands(df['Close']).bollinger_mavg()  # if needed
 
-DEBUGGING + STABILITY:
-28. Print SQL query result for debugging
-29. Avoid ambiguous conditions — wrap all boolean expressions in parentheses
-30. DO NOT use `.between()` inside loops
-31. For cumulative metrics like returns/drawdown, keep as pandas Series — do not convert to NumPy array unless doing element-wise math
-32. NEVER call `.iloc[]` on NumPy arrays — only on Series or DataFrames
-33. Use `warnings.filterwarnings("ignore")` to suppress ta-lib warnings
+Do NOT shift bands unless explicitly requested.  
 
-ADDITIONAL:
-34. Print trades rows showing actual Buy/Sell dates, prices, and indicators
-35. Ensure reproducible structure — keep all per-ticker logic inside the loop
-36. All extracted price series must have inherited datetime index from `ticker_data` — do NOT reindex manually
+Use these series to construct buy/sell signals when the query references "touching lower/upper band".
+
+#############################
+
+TRADES HANDLING
+
+##############################
+18. Build trades = ticker_data[['Buy', 'Sell']], then:
+- trades = trades.dropna(how='all')
+- buy_prices = trades['Buy'].dropna()
+- sell_prices = trades['Sell'].dropna()
+- Truncate to matched pairs:
+min_len = min(len(buy_prices), len(sell_prices)) 
+buy_prices = buy_prices.iloc[:min_len] 
+sell_prices = sell_prices.iloc[:min_len]
+
+##############################
+
+RETURNS & METRICS (PERCENTAGES)
+
+##############################
+19. Trade-level returns (completed pairs only):
+returns = pd.Series((sell_prices.values - buy_prices.values) / buy_prices.values)
+
+Construct **daily portfolio_value** using all-in/all-out logic over every date in ticker_data.index:
+
+Start with initial_capital = 100000.
+
+Maintain cash_balance and fractional shares:
+shares = cash_balance / Close[d] on Buy signal.
+
+- When buying shares:
+    - Restrict to integer shares: shares = int(cash_balance / Close)
+    - Adjust cash_balance accordingly
+- Make sure portfolio_value is computed consistently with chosen share method
+
+
+Update cash_balance and portfolio_value for each date.
+
+Forward-fill portfolio_value if needed for continuity.
+
+Define normalized equity curve:
+cumulative_curve = portfolio_value / float(portfolio_value.iloc[0])
+
+Metrics (all in percentages):
+
+Cumulative Return = (cumulative_curve.iloc[-1] - 1) * 100
+
+Annualized Return:
+
+total_days = (portfolio_value.index[-1] - portfolio_value.index[0]).days
+If total_days > 0:
+((cumulative_curve.iloc[-1]) ** (365 / total_days) - 1) * 100
+Else: 0
+
+Volatility:
+
+daily_rets = portfolio_value.pct_change().dropna()
+volatility = daily_rets.std() * sqrt(252) * 100
+If no trades executed, set = 0
+
+Max Drawdown:
+
+max_drawdown = (1 - cumulative_curve / cumulative_curve.cummax()).max() * 100
+If no trades executed i.e. len(cumulative_curve)=0, then set = 0
+
+Edge cases:
+
+If there are no completed trades (empty returns or no buy/sell pairs), set:
+
+Cumulative Return = 0
+Annualized Return = 0
+Volatility = 0
+Max Drawdown = 0
+
+Print: No trades executed for {ticker}
+
+Initialize all metric variables before conditionals to avoid NameError.
+
+##############################
+
+PLOTTING (PLOTLY)
+
+##############################
+25. Create a 2-row subplot via:
+fig = make_subplots(rows=2, cols=1, shared_xaxes=True, specs=[[{{"secondary_y": True}}], [{{}}]])
+
+Row 1 (Price & Indicators & Markers):
+
+Plot Close price as a blue line on the primary y-axis (secondary_y=False).
+
+Plot indicators referenced by the strategy:
+
+SMAs/EMAs: computed with .shift(1), plot as dotted lines with distinct colors.
+
+RSI, MACD, and similar oscillator/secondary indicators on the secondary y-axis (secondary_y=True).
+
+Buy markers: green triangle-up markers at ticker_data['Buy'] values.
+
+Sell markers: red triangle-down markers at ticker_data['Sell'] values.
+
+Plot markers only at valid (non-NaN) signal points; Plotly will ignore NaNs automatically.
+
+Row 2 (Equity Curve):
+
+Plot portfolio_value as a continuous purple line.
+
+Layout & Axes:
+
+Ensure ticker_data.index is a DatetimeIndex and is used as x for all traces.
+
+fig.update_layout(xaxis=dict(type='date'))
+
+fig.update_yaxes(title_text="Price", row=1, col=1, secondary_y=False)
+
+fig.update_yaxes(title_text="Indicator", row=1, col=1, secondary_y=True)
+
+Keep Price and Indicator y-axes ranges independent.
+
+Give proper titles, legends. Plot axis labels appropriately.
+
+Save Final Combined Plot:
+
+fig.write_html(f"{ticker}_plot.html")
+
+##############################
+
+FINAL OUTPUT
+
+##############################
+30. Append per-ticker metrics into a list of dicts with keys:
+Ticker, Cumulative Return, Annualized Return, Volatility, Max Drawdown
+(All metric values in percentages.)
+
+Convert to DataFrame and save:
+DataFrame.to_html('trading_results.html', index=False)
+
+##############################
+
+DEBUGGING + STABILITY
+
+##############################
+32. Print a brief confirmation of SQL read (e.g., shape or head).
+33. Wrap boolean expressions in parentheses to avoid ambiguity.
+34. Do NOT use .between() inside loops.
+35. For cumulative calculations (returns/drawdown), operate on pandas Series (not NumPy arrays).
+36. NEVER call .iloc[] on NumPy arrays — only on Series/DataFrames.
+37. Use warnings.filterwarnings("ignore") to suppress ta warnings.
+38. Print a small table of executed trades (buy/sell dates and prices) per ticker for inspection.
+39. Keep all per-ticker logic self-contained in the loop.
+40. All extracted price series must inherit the datetime index from ticker_data — do not reindex manually.
 
 """
+
           
     print(prompt)
     messages = [
