@@ -6,6 +6,7 @@ import sqlite3
 from dotenv import load_dotenv
 import os
 import datetime
+import re
 
 # Load environment variables from .env file
 load_dotenv()
@@ -15,25 +16,49 @@ api_key = os.getenv("OPENAI_API_KEY")
 
 llm = ChatOpenAI(temperature=0.2, openai_api_key=api_key, model="gpt-4o-mini")
 
-def generate_code(intent_json: str, stock_data: pd.DataFrame) -> dict:
-    print(intent_json)
-    parsed = json.loads(intent_json)
-    ticker = parsed.get("ticker")
-    
-    strategy = parsed.get("strategy_description", "")
-    buy_condition = parsed.get("buy_condition", "")
-    sell_condition = parsed.get("sell_condition", "")
-    date_range = parsed.get("date_range", "")
-    duration_type = parsed.get("duration_type", "")
-    duration_days = int(parsed.get("duration_days", 0))
+def extract_code_blocks(response_text: str) -> str:
+    """Extract <code>...</code> block, discard <reasoning>."""
+    match = re.search(r"<code>(.*?)</code>", response_text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return response_text.strip()
 
+def generate_code(intent_dict: dict) -> dict:
+    """
+    Generate code based on the parsed intent dictionary.
+    """
+    print(intent_dict)
+
+    ticker = intent_dict.get("ticker")
+    strategy = intent_dict.get("strategy_description", "")
+    buy_condition = intent_dict.get("buy_condition", "")
+    sell_condition = intent_dict.get("sell_condition", "")
+    date_range = intent_dict.get("date_range", "")
+    duration_type = intent_dict.get("duration_type", "")
+    duration_days = int(intent_dict.get("duration_days", 0))
     # Convert the JSON to a string to pass into the prompt
-    intent_json_str = json.dumps(intent_json)
+    
     prompt = f"""
-Write Python code to implement the following stock trading strategy.
+You are a professional trading code generation agent.
 
-Ensure the output is ONLY executable Python code — no comments, no markdown, no pip install, and NO code fences like ```python.
+First, think step by step about:
+- Which indicators and rules are explicitly required by {strategy}, {buy_condition}, {sell_condition}, {duration_type}
+- Whether stop-loss, consecutive days, or duration are explicitly mentioned (if not, do NOT add them)
+- Which technical indicators must be computed.
+- Data when fetched from SQLite, must be parsed and sorted by Date.
+- How to ensure correct indexing, no lookahead bias, vectorization, etc.
 
+Wrap your reasoning inside <reasoning> ... </reasoning>.
+Then output ONLY executable Python code inside <code> ... </code>.
+
+<reasoning>
+Explain (to yourself) how to transform the inputs into working Python backtest code.
+This reasoning is hidden from the user and never executed.
+</reasoning>
+
+<code>
+# Python code goes here
+</code>
 ##############################
 
 GLOBAL ENFORCEMENT (READ FIRST)
@@ -154,21 +179,27 @@ SIGNAL LOGIC
 
 State handling:
 
-Maintain in_position boolean.
+SEQUENTIAL TRADING LOGIC (CRITICAL)
 
-Buy only if in_position == False and the buy condition is met.
+- Maintain a boolean `in_position` for each ticker.
+- Loop sequentially over ticker_data.index:
+    for i in range(len(ticker_data)):
+        if not in_position and buy_condition_met(i):
+            ticker_data['Buy'].iloc[i] = ticker_data['Close'].iloc[i]
+            in_position = True
+        elif in_position and sell_condition_met(i):
+            ticker_data['Sell'].iloc[i] = ticker_data['Close'].iloc[i]
+            in_position = False
+- Do NOT create Buy/Sell series by multiplying booleans by Close.
+- Ensure signals strictly alternate buy → sell → buy.
+- This preserves sequential trading and ensures portfolio_value calculations work.
 
-Sell only if in_position == True and the sell condition is met.
+- Store signals in new columns: ticker_data['Buy'], ticker_data['Sell'] containing prices at signal bars and NaN elsewhere.
 
-Signals must alternate strictly: buy → sell → buy. Ignore sells with no open position.
-
-Mark signals at the exact bar/time they trigger (use the current index position).
-
-Keep signals sparse:
-
-Do NOT forward-fill buy/sell columns.
-
-Store signals in new columns: ticker_data['Buy'], ticker_data['Sell'] containing prices at signal bars and NaN elsewhere.
+- When generating buy/sell signals, do NOT output booleans. Instead, output the actual stock price at which the buy/sell occurs. 
+    For example, if a buy signal occurs when RSI < 35, set:
+    Buy = (RSI < 35) * Close
+    Sell = (RSI > 65) * Close
 
 - When constructing daily portfolio_value, check buy and sell signals independently for each date:
     - Do NOT use `elif` between buy and sell.
@@ -345,6 +376,7 @@ Ticker, Cumulative Return, Annualized Return, Volatility, Max Drawdown
 Convert to DataFrame and save:
 DataFrame.to_html('trading_results.html', index=False)
 
+Also print the names of generated HTML files for each ticker at the end.
 ##############################
 
 DEBUGGING + STABILITY
@@ -365,22 +397,25 @@ DEBUGGING + STABILITY
           
     print(prompt)
     messages = [
-        SystemMessage(content="Write simple python code. Do not use yfinance. VERY IMP: DO NOT include'''python. '''python causes code to break. Required data is stored in SQLite3 table provided in the query. Use the ta library, importing MACD from ta.trend and RSI from ta.momentum if needed. Initialize ta class."\
-                      "Include required libraries eg. numpy. Initialize ta class properly. Use: from ta.momentum import RSIIndicator. Please note: DO NOT use ta.add_all_ta_features(This is not required and gives error). "\
-                      "DO NOT include any comments. Only executable python code. Print output as per instructions." \
-                      "The generated Python code must be compatible with pandas 2.0+."\
-                      "Replace any usage of the deprecated Series.append() or DataFrame.append() with pd.concat([obj1, obj2])." \
-                      "When generating code that creates signal lists (e.g., Buy/Sell, Long/Short), ensure the lists are exactly the same length as the DataFrame index."\
-                      "Always start the lists pre-filled with np.nan for all rows (e.g., [np.nan] * len(data)) or append values for every iteration so the final list length equals len(data)."\
-                      "Do not start loops at range(1, len(data)) unless you also pre-fill the first element(s) to keep lengths equal."\
-                      "Before assigning to data['column'], validate that len(list) == len(data)."\
-                      "The fix must be generic so it works for MACD, RSI, SMA, or any other indicator as applicable."\
-                      "Add checks whereever necessary to see if there is no data before accessing data."
-                      ),
+        SystemMessage(content="Follow all enforcement rules strictly. Output format must include <reasoning>...</reasoning> and <code>...</code>. Do not include ```python fences."),
         HumanMessage(content=prompt)
     ]
     
-
     response = llm.invoke(messages)
-    print("Generated code: ",response.content)
-    return {"code": response.content}
+    logs = []
+
+    reasoning_match = re.search(r"<reasoning>(.*?)</reasoning>", response.content, re.DOTALL)
+    reasoning_text = reasoning_match.group(1).strip() if reasoning_match else "No reasoning captured."
+
+    logs.append({
+        "step": "code_generator",
+        "cot": reasoning_text
+    })
+
+    final_code = extract_code_blocks(response.content)
+    print("Extracted code: ", final_code)
+
+    return {
+        "code": final_code,
+        "logs": logs
+    }

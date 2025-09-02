@@ -1,221 +1,84 @@
 # main.py
 
 import os
-import sys
 import json
-import sqlite3
-import pandas as pd
-import yfinance as yf
-import requests
-from dotenv import load_dotenv
-from typing import TypedDict
-import urllib.parse
-
-from fastapi import FastAPI
+import asyncio
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
+from fastapi.responses import JSONResponse
 
-from celery.result import AsyncResult
-
-# Import your multi-agent/langgraph modules
 from agents.interpreter import interpret_query
 from agents.codegen import generate_code
 from agents.code_cleaner import clean_code
 from agents.ticker_lookup import resolve_ticker
-from langgraph.graph import StateGraph, END
+from orchestrator.mcp_orchestrator import MCPOrchestrator
+from wrappers.executor_wrapper import executor_wrapper
 
-# Import Celery app and task
-from tasks.executor import app as celery_app
-from tasks.executor import run_python_code  # Celery task
-
-import os
-from fastapi.responses import FileResponse
 # -----------------------------
-# Type Definitions
+# Configuration
 # -----------------------------
-
 HTML_DIR = "."
-
-
-class GraphState(TypedDict):
-    input: str
-    intent: str
-    code: str
-    clean_code: str
-    execution_result: str
-
-class QueryRequest(BaseModel):
-    query: str
-
-# -----------------------------
-# Utility Functions
-# -----------------------------
-def save_dataframe_to_sqlite(df, db_name='market_data.db', table_name='stock_data'):
-    conn = sqlite3.connect(db_name)
-    df.to_sql(table_name, conn, if_exists='replace', index=False)
-    conn.close()
-
-def fetch_fmp_single_ticker(tkr, ticker_try, start_date, end_date):
-    load_dotenv()
-    FMP_API_KEY = os.getenv("FMP_API_KEY")
-    FMP_BASE_URL ="https://financialmodelingprep.com/api/v3"
-    url = f"{FMP_BASE_URL}/historical-price-full/{urllib.parse.quote(ticker_try)}"
-    params = {
-        "from": start_date,
-        "to": end_date,
-        "apikey": FMP_API_KEY
-    }
-
-    resp = requests.get(url, params=params)
-    if resp.status_code != 200:
-        print(f"HTTP Error {resp.status_code} for {ticker_try}")
-        return pd.DataFrame()
-    data = resp.json()
-    if "historical" not in data or not data["historical"]:
-        return pd.DataFrame()
-    df = pd.DataFrame(data["historical"])
-    df.rename(columns={
-        "date": "Date",
-        "close": "Close",
-        "open": "Open",
-        "high": "High",
-        "low": "Low",
-        "volume": "Volume",
-        "adjClose": "Adj Close" if "adjClose" in df.columns else "Close"
-    }, inplace=True)
-    keep_cols = [c for c in ["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"] if c in df.columns]
-    df = df[keep_cols]
-    df["Ticker"] = tkr
-    print("data:", df)
-    return df
-
-def get_fmp_stock_data(tickers, start_date, end_date):
-    try:
-        if isinstance(tickers, str):
-            tickers = [t.strip() for t in tickers.split(",")]
-        elif not isinstance(tickers, list):
-            raise ValueError("Tickers must be a string or list")
-        
-        dfs = []
-        for tkr in tickers:
-            for suffix in [".NS", ".BS", ""]:
-                ticker_try = tkr + suffix if suffix else tkr
-                df = fetch_fmp_single_ticker(tkr, ticker_try, start_date, end_date)
-                if not df.empty:
-                    dfs.append(df)
-                    break
-            else:
-                print(f"No data found for {tkr} with any suffix")
-        if not dfs:
-            raise Exception("No data fetched for any ticker.")
-        final_df = pd.concat(dfs, ignore_index=True)
-        save_dataframe_to_sqlite(final_df)
-        return final_df
-    except Exception as e:
-        print(f"Error fetching data: {e}")
-        sys.exit(1)
-
-# -----------------------------
-# LangGraph Nodes
-# -----------------------------
-def node_interpreter(state):
-    user_input = state["input"]
-    return interpret_query(user_input)
-
-def node_ticker_lookup(state):
-    """Resolve company names to tickers using external API."""
-    try:
-        intent_json = state["intent"].replace("```json\n", "").replace("\n```", "")
-        parsed = json.loads(intent_json)
-
-        # Assume parsed["ticker"] might be a company name
-        ticker_or_company = parsed["ticker"]
-
-        resolved = resolve_ticker(ticker_or_company)  # call your lookup agent
-        parsed["ticker"] = resolved  # replace with actual ticker(s)
-
-        return {"intent": json.dumps(parsed)}
-    except Exception as e:
-        return {"intent": state["intent"], "error": str(e)}
-
-
-def node_codegen(state):
-    cleaned_content = state["intent"].replace("```json\n", "").replace("\n```", "")
-    parsed_query = json.loads(cleaned_content)
-
-    tickers = parsed_query["ticker"]  
-    #ticker = parsed_query["ticker"]
-    start_date = parsed_query["start_date"]
-    end_date = parsed_query["end_date"]
-    buy_condition = parsed_query["buy_condition"]
-    sell_condition = parsed_query["sell_condition"]
-
-    # Fetch stock data
-    stock_data = get_fmp_stock_data(tickers, start_date, end_date)
-    return generate_code(cleaned_content, stock_data)
-
-def node_cleaner(state):
-    return clean_code(state["code"])
-
-def node_executor(state):
-    result = run_python_code.delay(state["clean_code"])  # Submit task to Celery
-    return {"execution_result": f"Task submitted: {result.id}"}
-
-# -----------------------------
-# Build LangGraph
-# -----------------------------
-builder = StateGraph(GraphState)
-builder.add_node("interpreter", node_interpreter)
-builder.add_node("ticker_lookup", node_ticker_lookup)   # NEW
-builder.add_node("codegen", node_codegen)
-builder.add_node("code_cleaner", node_cleaner)
-builder.add_node("executor", node_executor)
-
-builder.set_entry_point("interpreter")
-builder.add_edge("interpreter", "ticker_lookup")        # interpreter → ticker_lookup
-builder.add_edge("ticker_lookup", "codegen")            # ticker_lookup → codegen
-builder.add_edge("codegen", "code_cleaner")
-builder.add_edge("code_cleaner", "executor")
-builder.add_edge("executor", END)
-
-langgraph_app = builder.compile()
-
-# -----------------------------
-# FastAPI App
-# -----------------------------
 fastapi_app = FastAPI()
 
 fastapi_app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # React dev server
+    allow_origins=["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@fastapi_app.post("/api/submit-query")
-async def submit_query(req: QueryRequest):
-    
-    final = langgraph_app.invoke({"input": req.query})
-    execution_result = final["execution_result"]
-    task_id = execution_result.split(":")[-1].strip()
-    return {"task_id": task_id}
+# -----------------------------
+# MCP Orchestrator Instance
+# -----------------------------
+orchestrator = MCPOrchestrator(
+    interpreter=interpret_query,
+    code_generator=generate_code,
+    ticker_lookup=resolve_ticker,
+    code_cleaner=clean_code,
+    executor=executor_wrapper,
+)
 
-@fastapi_app.get("/api/task-status/{task_id}")
-async def task_status(task_id: str):
-    async_result = AsyncResult(task_id, app=celery_app)  # <-- use Celery app here
-    if async_result.ready():
-        return {"status": async_result.state, "result": async_result.result}
-    else:
-        return {"status": async_result.state}
-    
+# -----------------------------
+# Request Models
+# -----------------------------
+class QueryRequest(BaseModel):
+    query: str
+
+# -----------------------------
+# Streaming Logs Endpoint
+# -----------------------------
+@fastapi_app.post("/api/submit-query")
+async def submit_query(req: Request):
+    payload = await req.json()
+    query = payload.get("query", "")
+    if not query:
+        return JSONResponse({"error": "No query provided"}, status_code=400)
+
+    try:
+        # Run the orchestrator synchronously and get final context
+        context = orchestrator.run(query)
+
+        # Build response for frontend
+        response = {
+            "status": "SUCCESS",
+            "logs": context.get("logs", []),
+            "result": context.get("execution", {})  # final execution result
+        }
+
+        return JSONResponse(response)
+
+    except Exception as e:
+        return JSONResponse({"status": "FAILURE", "error": str(e)}, status_code=500)
+# -----------------------------
+# HTML Files Endpoints
+# -----------------------------
 @fastapi_app.get("/api/list-html")
 def list_html_files():
     try:
-        files = [
-            f for f in os.listdir(HTML_DIR)
-            if f.endswith(".html")
-        ]
+        files = [f for f in os.listdir(HTML_DIR) if f.endswith(".html")]
         return {"files": files}
     except Exception as e:
         return {"files": [], "error": str(e)}
@@ -227,11 +90,12 @@ def get_html(file_name: str):
         return FileResponse(file_path, media_type="text/html")
     return {"error": "File not found"}
 
+
 # -----------------------------
-# Optional: Run standalone
+# Run standalone
 # -----------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(fastapi_app, host="127.0.0.1", port=8000, reload=True)
 
-app = fastapi_app  # alias for Uvicorn
+app = fastapi_app

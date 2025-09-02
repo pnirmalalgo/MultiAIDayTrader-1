@@ -1,49 +1,53 @@
-from celery import Celery
+from celery import Celery, current_task
 import subprocess
 import uuid
 import os
-
 import logging
+import time
 
 logging.basicConfig(level=logging.INFO)
 
-app = Celery("executor", 
-             broker="redis://localhost:6379/0", backend="redis://localhost:6379/0")
-# Requires Redis running
+app = Celery(
+    "executor",
+    broker="redis://localhost:6379/0",
+    backend="redis://localhost:6379/0"
+)
 
-# folder to keep generated scripts
 SCRIPT_DIR = "generated_scripts"
 os.makedirs(SCRIPT_DIR, exist_ok=True)
 
-@app.task
-def run_python_code(code: str):
-    print('here')
-    # save to persistent folder
+@app.task(bind=True)
+def run_python_code(self, code: str):
     filename = os.path.join(SCRIPT_DIR, f"code_{uuid.uuid4().hex}.py")
-
     logging.info(f"Saved code to {filename} (length={len(code)})")
-
-    # write code to file
+    
     with open(filename, "w") as f:
         f.write(code)
 
+    logs = []
     try:
+        # Example: push logs incrementally
+        logs.append("Starting execution...")
+        print("DEBUG: pushing logs ->", logs)
+        self.update_state(state="PROGRESS", meta={"logs": logs})
+        print("DEBUG: logs pushed")
+        
         output = subprocess.check_output(
             ["python", filename],
             stderr=subprocess.STDOUT,
             timeout=30
         )
-        return {
-            "output": output.decode(),
-            "file": filename
-        }
+        
+        logs.append("Execution finished successfully.")
+        self.update_state(state="SUCCESS", meta={"logs": logs})
+        return {"output": output.decode(), "file": filename, "logs": logs}
+
     except subprocess.CalledProcessError as e:
-        return {
-            "output": e.output.decode(),
-            "file": filename
-        }
+        logs.append(f"Error during execution: {e.output.decode()}")
+        self.update_state(state="FAILURE", meta={"logs": logs})
+        return {"output": e.output.decode(), "file": filename, "logs": logs}
+
     except subprocess.TimeoutExpired:
-        return {
-            "output": "Code execution timed out.",
-            "file": filename
-        }
+        logs.append("Code execution timed out.")
+        self.update_state(state="FAILURE", meta={"logs": logs})
+        return {"output": "Code execution timed out.", "file": filename, "logs": logs}
