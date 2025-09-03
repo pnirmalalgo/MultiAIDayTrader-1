@@ -45,7 +45,7 @@ If the user's query does NOT mention stop-loss, consecutive-day duration, or any
 
 Do NOT invent stop-loss, consecutive-day counters, or any other “helpful” features unless they are explicitly present in the provided strategy/buy/sell/duration inputs.
 
-The code must be minimal and strictly focused on the requested strategy.
+The code must be minimal and strictly focused on the requested strategy. Understand the strategy and buy & sell conditions very carefully. 
 
 ##############################
 
@@ -99,6 +99,17 @@ MACD and other indicators should be computed only if requested.
 
 Turning points/sign changes (if requested), detect using prior/cur values, e.g.:
 (series.shift(1) < 0) & (series > 0).
+
+##############################
+Important: When generating buy/sell signals based on indicator comparisons (e.g., SMA(10) vs SMA(30), RSI vs threshold, MACD vs Signal), do not generate signals continuously while the condition is true.
+Instead, generate a signal only at the crossover/moment of change, i.e.:
+
+A buy signal occurs only when the indicator condition changes from false to true (crossing up).
+
+A sell signal occurs only when the indicator condition changes from true to false (crossing down).
+
+This ensures signals are triggered once at the event, not continuously.
+####################
 
 Golden/Death Cross (only if explicitly referenced):
 
@@ -232,25 +243,34 @@ RETURNS & METRICS (PERCENTAGES)
 19. Trade-level returns (completed pairs only):
 returns = pd.Series((sell_prices.values - buy_prices.values) / buy_prices.values)
 
-Construct **daily portfolio_value** using all-in/all-out logic over every date in ticker_data.index:
+Construct **daily portfolio_value** (absolute ₹ or $ values) using all-in/all-out logic.
 
 Start with initial_capital = 100000.
 
-Maintain cash_balance and fractional shares:
-shares = cash_balance / Close[d] on Buy signal.
+Maintain cash_balance and integer shares:
+- On Buy: shares = int(cash_balance / Close[d]); adjust cash_balance
+- On Sell: liquidate all shares; update cash_balance
+- Each day: portfolio_value[d] = cash_balance + shares * Close[d]
 
-- When buying shares:
-    - Restrict to integer shares: shares = int(cash_balance / Close)
-    - Adjust cash_balance accordingly
-- Make sure portfolio_value is computed consistently with chosen share method
+After loop, build:
+portfolio_series = pd.Series(portfolio_value_list, index=ticker_data.index)
 
+⚠️ Always normalize before metrics:
+cumulative_curve = portfolio_series / float(portfolio_series.iloc[0])
 
-Update cash_balance and portfolio_value for each date.
+Metrics must always use this normalized `cumulative_curve`:
+- Cumulative Return = (cumulative_curve.iloc[-1] - 1) * 100
+- Annualized Return = ((cumulative_curve.iloc[-1]) ** (365 / total_days) - 1) * 100
+- Volatility = cumulative_curve.pct_change().dropna().std() * sqrt(252) * 100
+- Max Drawdown = (1 - cumulative_curve / cumulative_curve.cummax()).max() * 100
 
-Forward-fill portfolio_value if needed for continuity.
+When generating trading strategy scripts, always:
 
-Define normalized equity curve:
-cumulative_curve = portfolio_value / float(portfolio_value.iloc[0])
+Convert the portfolio value list into a Pandas Series with the date index.
+
+Use this Series (portfolio_series) for computing daily returns, volatility, cumulative return, annualized return, and max drawdown.
+
+Do not use raw Python lists for .pct_change() or other Pandas methods.”
 
 Metrics (all in percentages):
 
@@ -288,46 +308,39 @@ Print: No trades executed for {ticker}
 Initialize all metric variables before conditionals to avoid NameError.
 
 ##############################
-
 PLOTTING (PLOTLY)
 
 ##############################
 25. Create a 2-row subplot via:
-fig = make_subplots(rows=2, cols=1, shared_xaxes=True, specs=[[{{"secondary_y": True}}], [{{}}]])
+fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                    specs=[[{{"secondary_y": True}}], [{{}}]])
 
 Row 1 (Price & Indicators & Markers):
 
-Plot Close price as a blue line on the primary y-axis (secondary_y=False).
+- Plot Close price as a blue line on the primary y-axis (secondary_y=False).
+- Plot trend indicators (SMA, EMA, Bollinger Bands, etc.) on the primary y-axis with dotted lines.
+- Plot oscillators (RSI, MACD, Stochastic, etc.) **always on the secondary y-axis (secondary_y=True)**.
+- 🔹 For RSI, explicitly set the y-axis range to [0, 100]. 
+- 🔹 Never plot oscillators on the primary y-axis with price.
 
-Plot indicators referenced by the strategy:
-
-SMAs/EMAs: computed with .shift(1), plot as dotted lines with distinct colors.
-
-RSI, MACD, and similar oscillator/secondary indicators on the secondary y-axis (secondary_y=True).
-
-Buy markers: green triangle-up markers at ticker_data['Buy'] values.
-
-Sell markers: red triangle-down markers at ticker_data['Sell'] values.
-
-Plot markers only at valid (non-NaN) signal points; Plotly will ignore NaNs automatically.
+- Plot Buy markers: green triangle-up markers at ticker_data['Buy'] values.
+- Plot Sell markers: red triangle-down markers at ticker_data['Sell'] values.
+- Plot markers only at valid (non-NaN) signal points.
 
 Row 2 (Equity Curve):
 
-Plot portfolio_value as a continuous purple line.
+- Plot portfolio_value as a continuous purple line.
 
 Layout & Axes:
 
-Ensure ticker_data.index is a DatetimeIndex and is used as x for all traces.
+- Ensure ticker_data.index is a DatetimeIndex and is used as x for all traces.
+- fig.update_layout(xaxis=dict(type='date'))
+- fig.update_yaxes(title_text="Price", row=1, col=1, secondary_y=False)
+- 🔹 fig.update_yaxes(title_text="Oscillator / Indicator", row=1, col=1, 
+                      secondary_y=True, range=[0, 100] if RSI is plotted)
 
-fig.update_layout(xaxis=dict(type='date'))
-
-fig.update_yaxes(title_text="Price", row=1, col=1, secondary_y=False)
-
-fig.update_yaxes(title_text="Indicator", row=1, col=1, secondary_y=True)
-
-Keep Price and Indicator y-axes ranges independent.
-
-Give proper titles, legends. Plot axis labels appropriately.
+- Keep Price and Indicator y-axes ranges independent.
+- Provide proper titles, legends, and axis labels.
 
 Save Final Combined Plot:
 
@@ -342,8 +355,37 @@ FINAL OUTPUT
 Ticker, Cumulative Return, Annualized Return, Volatility, Max Drawdown
 (All metric values in percentages.)
 
-Convert to DataFrame and save:
-DataFrame.to_html('trading_results.html', index=False)
+After finishing the ticker loop:
+- Convert all_metrics list into DataFrame
+- Save once: trading_results.to_html("trading_results.html", index=False)
+- Append to outputs: output_files.append("trading_results.html")
+⚠️ Do NOT save or append trading_results.html inside the per-ticker loop.
+Save it once after processing all tickers, then append to output_files.
+
+
+When you generate code that saves any output files (e.g., plots, reports, HTML):
+
+1. Collect all filenames into a list called `output_files`.
+   - Example: output_files = []
+
+2. Each time you save a file, append its name:
+   - output_files.append("filename.html")
+
+3. At the very end of the script, ALWAYS add:
+
+   try:
+       context["execution"]["files"] = output_files
+   except NameError:
+       pass  # context not defined in standalone runs
+
+   print("Generated files:", output_files)
+
+This ensures:
+- Filenames are captured in the LangGraph execution context.
+- They can be returned to the orchestrator/React frontend.
+- The script still runs safely when executed outside LangGraph.
+
+This must be done **every time** output files are generated.
 
 ##############################
 
