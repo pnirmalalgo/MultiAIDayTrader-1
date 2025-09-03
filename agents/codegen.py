@@ -324,6 +324,15 @@ Print: No trades executed for {ticker}
 
 Initialize all metric variables before conditionals to avoid NameError.
 
+- If metrics is a single dictionary, convert scalars to lists.
+- If metrics is a list of dictionaries, pass it directly to pd.DataFrame.
+- Use dynamic code like:
+
+if isinstance(metrics, dict):
+    trading_results = pd.DataFrame({{k: [v] if not isinstance(v, list) else v for k, v in metrics.items()}})
+else:
+    trading_results = pd.DataFrame(metrics)
+
 ##############################
 PLOTTING (PLOTLY)
 
