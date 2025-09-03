@@ -235,6 +235,15 @@ min_len = min(len(buy_prices), len(sell_prices))
 buy_prices = buy_prices.iloc[:min_len] 
 sell_prices = sell_prices.iloc[:min_len]
 
+- After truncating buy_prices and sell_prices to matched pairs, also remove the corresponding entries in ticker_data['Buy'] and ticker_data['Sell'] so that plotted Buy/Sell markers only correspond to completed trades.
+- Use vectorized assignment: replace unmatched buy/sell entries with np.nan.
+- Example logic:
+   ticker_data['Buy'] = np.where(ticker_data.index.isin(buy_prices.index), ticker_data['Buy'], np.nan)
+   ticker_data['Sell'] = np.where(ticker_data.index.isin(sell_prices.index), ticker_data['Sell'], np.nan)
+- This prevents any buy signal appearing after the last completed sell.
+- Ensure there are no unmatched Buy or Sell markers at the edges of the plot.
+
+
 ##############################
 
 RETURNS & METRICS (PERCENTAGES)
@@ -251,6 +260,14 @@ Maintain cash_balance and integer shares:
 - On Buy: shares = int(cash_balance / Close[d]); adjust cash_balance
 - On Sell: liquidate all shares; update cash_balance
 - Each day: portfolio_value[d] = cash_balance + shares * Close[d]
+
+NEW: For all metric calculations (Cumulative Return, Annualized Return, Volatility, Max Drawdown), use portfolio_series / cumulative_curve derived from it. 
+- ALWAYS use the pandas Series portfolio_series (or cumulative_curve) for ALL calculations of returns, volatility, and drawdowns.
+- Do NOT use any Python list (like portfolio_value_list) for .pct_change(), .std(), .cummax(), or any metric calculation.
+- If the Series is empty, set all metrics to 0. Never calculate metrics on lists.
+- If portfolio_series is empty (no trades executed), set all metrics = 0. 
+- Always validate that total_days > 0 before computing annualized return. 
+- Wrap cumulative_curve / cumulative_curve.cummax() and pct_change() calls with checks for non-empty Series.
 
 After loop, build:
 portfolio_series = pd.Series(portfolio_value_list, index=ticker_data.index)
