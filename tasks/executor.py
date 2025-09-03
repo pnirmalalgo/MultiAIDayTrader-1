@@ -1,49 +1,96 @@
+# executor.py
 from celery import Celery
 import subprocess
 import uuid
 import os
-
 import logging
+import ast
+import time
 
 logging.basicConfig(level=logging.INFO)
 
-app = Celery("executor", 
-             broker="redis://localhost:6379/0", backend="redis://localhost:6379/0")
-# Requires Redis running
+app = Celery(
+    "executor",
+    broker="redis://localhost:6379/0",
+    backend="redis://localhost:6379/0"
+)
 
-# folder to keep generated scripts
 SCRIPT_DIR = "generated_scripts"
 os.makedirs(SCRIPT_DIR, exist_ok=True)
 
-@app.task
-def run_python_code(code: str):
-    print('here')
-    # save to persistent folder
+# Optionally, set the PLOTS_DIR to the same folder your FastAPI serves via StaticFiles.
+# If FastAPI uses PLOTS_DIR = os.path.abspath("."), keep this as '.'
+PLOTS_DIR = os.path.abspath(".")  
+
+@app.task(bind=True)
+def run_python_code(self, code: str):
+    """
+    Save the incoming code, run it in a subprocess, and return output + discovered HTML files.
+    The function tries multiple strategies to discover generated HTML files:
+      1) Look for a printed debug line: Generated files: [...]
+      2) Detect new .html files created between before/after snapshots of PLOTS_DIR.
+    """
     filename = os.path.join(SCRIPT_DIR, f"code_{uuid.uuid4().hex}.py")
-
     logging.info(f"Saved code to {filename} (length={len(code)})")
-
-    # write code to file
+    
     with open(filename, "w") as f:
         f.write(code)
 
+    logs = []
     try:
+        # Snapshot before running
+        before_html = set([f for f in os.listdir(PLOTS_DIR) if f.endswith(".html")])
+
+        logs.append("Starting execution...")
+        self.update_state(state="PROGRESS", meta={"logs": logs})
+
+        # Execute the script
         output = subprocess.check_output(
             ["python", filename],
             stderr=subprocess.STDOUT,
-            timeout=30
+            timeout=60  # increase if scripts take longer
         )
+        decoded_output = output.decode()
+        logs.append("Execution finished (subprocess returned).")
+
+        # 1) Try parse "Generated files: [...]" in output
+        files = []
+        for line in decoded_output.splitlines():
+            if "Generated files:" in line:
+                try:
+                    # safely evaluate the list literal
+                    candidate = line.split("Generated files:", 1)[1].strip()
+                    parsed = ast.literal_eval(candidate)
+                    if isinstance(parsed, (list, tuple)):
+                        files = list(parsed)
+                        break
+                except Exception:
+                    # ignore parse errors, fallback to directory scan
+                    pass
+
+        # 2) Fallback: detect new HTML files created
+        if not files:
+            after_html = set([f for f in os.listdir(PLOTS_DIR) if f.endswith(".html")])
+            new_files = sorted(list(after_html - before_html))
+            files = new_files
+
+        # Finalize logs and return
+        logs.append(f"Detected files: {files}")
+        self.update_state(state="SUCCESS", meta={"logs": logs})
         return {
-            "output": output.decode(),
-            "file": filename
+            "output": decoded_output,
+            "file": filename,
+            "logs": logs,
+            "files": files
         }
+
     except subprocess.CalledProcessError as e:
-        return {
-            "output": e.output.decode(),
-            "file": filename
-        }
+        err_out = e.output.decode() if hasattr(e, "output") else str(e)
+        logs.append(f"Error during execution: {err_out}")
+        self.update_state(state="FAILURE", meta={"logs": logs})
+        return {"output": err_out, "file": filename, "logs": logs, "files": []}
+
     except subprocess.TimeoutExpired:
-        return {
-            "output": "Code execution timed out.",
-            "file": filename
-        }
+        logs.append("Code execution timed out.")
+        self.update_state(state="FAILURE", meta={"logs": logs})
+        return {"output": "Code execution timed out.", "file": filename, "logs": logs, "files": []}
