@@ -37,7 +37,10 @@ def run_python_code(self, code: str):
         f.write(code)
 
     logs = []
+
+    
     try:
+        
         # Snapshot before running
         before_html = set([f for f in os.listdir(PLOTS_DIR) if f.endswith(".html")])
 
@@ -55,14 +58,19 @@ def run_python_code(self, code: str):
 
         # 1) Try parse "Generated files: [...]" in output
         files = []
+        logs.append(f"DEBUG — Subprocess output:\n{decoded_output}")
         for line in decoded_output.splitlines():
+            #logs.append(line)
             if "Generated files:" in line:
                 try:
                     # safely evaluate the list literal
                     candidate = line.split("Generated files:", 1)[1].strip()
                     parsed = ast.literal_eval(candidate)
+                    #logs.append("Parsed generated files:", parsed)  # Debugging line
                     if isinstance(parsed, (list, tuple)):
+                        #logs.append("Using parsed file list from output.")
                         files = list(parsed)
+                        #logs.append(f"Detected files: {files}")
                         break
                 except Exception:
                     # ignore parse errors, fallback to directory scan
@@ -75,22 +83,25 @@ def run_python_code(self, code: str):
             files = new_files
 
         # Finalize logs and return
-        logs.append(f"Detected files: {files}")
-        self.update_state(state="SUCCESS", meta={"logs": logs})
-        return {
-            "output": decoded_output,
-            "file": filename,
+        logs.append(f"files: {files}")
+        self.update_state(state="SUCCESS", meta={
             "logs": logs,
-            "files": files
-        }
+            "files": files,
+            "output": decoded_output,
+            "file": filename
+        })
 
     except subprocess.CalledProcessError as e:
         err_out = e.output.decode() if hasattr(e, "output") else str(e)
         logs.append(f"Error during execution: {err_out}")
-        self.update_state(state="FAILURE", meta={"logs": logs})
-        return {"output": err_out, "file": filename, "logs": logs, "files": []}
+        raise RuntimeError(f"Subprocess failed: {err_out}") from e
+    except subprocess.TimeoutExpired as e:
+        err_out = e.output.decode() if hasattr(e, "output") else str(e)
+        logs.append(f"Error during execution: {err_out}")
+        raise RuntimeError(f"Subprocess failed: {err_out}") from e
 
-    except subprocess.TimeoutExpired:
-        logs.append("Code execution timed out.")
-        self.update_state(state="FAILURE", meta={"logs": logs})
-        return {"output": "Code execution timed out.", "file": filename, "logs": logs, "files": []}
+    except Exception as e:
+        err_out = e.output.decode() if hasattr(e, "output") else str(e)
+        logs.append(f"Error during execution: {err_out}")
+        raise RuntimeError(f"Subprocess failed: {err_out}") from e
+        

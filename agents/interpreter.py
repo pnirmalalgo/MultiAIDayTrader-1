@@ -1,24 +1,41 @@
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import SystemMessage, HumanMessage
-import datetime
-from dotenv import load_dotenv
+from langchain_community.chat_models import ChatOpenAI
+from langchain.schema import HumanMessage
 import os
+from dotenv import load_dotenv
+import json
+import datetime
+import re
 
-# Load environment variables from .env file
 load_dotenv()
-
-# Access the API key
 api_key = os.getenv("OPENAI_API_KEY")
 
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2, openai_api_key=api_key)
+llm = ChatOpenAI(model_name="gpt-4o-mini", temperature=0, openai_api_key=api_key)
 
-def interpret_query(query: str) -> dict:
+def extract_json_from_cot(output: str):
+    try:
+        # Try to extract JSON block using regex (greedy match for {...})
+        match = re.search(r"{[\s\S]*}", output)
+        if not match:
+            raise ValueError("No JSON block found in output.")
+        
+        json_str = match.group(0)
+
+        parsed = json.loads(json_str)
+        return parsed
+
+    except Exception as e:
+        print("Failed to extract JSON from CoT:", str(e))
+        return {}
+    
+def interpreter_with_cot(user_query):
     today = datetime.date.today().isoformat()
-
     prompt = f"""
-You are a trading query interpreter. Parse the user's query into structured JSON. 
+    You are a trading query interpreter.
+    1. First, write your reasoning step by step under "Thoughts:".
+    2. Then, write the structured query in strict JSON format under "Structured Query:".
+    3. Only include the JSON under "Structured Query:", no explanations there.
 
-Always extract buy and sell conditions as logical groups with 'and' / 'or' logic.
+    Always extract buy and sell conditions as logical groups with 'and' / 'or' logic.
 Use the following schema for each condition:
 - logic: 'and' | 'or'
 - conditions: list of objects like:
@@ -51,8 +68,9 @@ Please return a JSON object containing the following:
 - "ticker": Identify the Company names given in the query. Do not return ticker symbols. Just return the company names as mentioned in the query. 
   + Identify and normalize company names into their official names as listed on stock exchanges. 
   + If there are multiple companies mentioned, return a list of names.
-  + Expand abbreviations (e.g., L&T → Larsen & Toubro, HDFC → Housing Development Finance Corporation). 
+  + Expand abbreviations (e.g., L&T → Larsen & Toubro, HDFC → Housing Development Finance Corporation).   
   + If the user adds a country suffix like "India", drop it when returning the canonical name.
+  + IMPORTANT: Always return the ticker as an actual string or list of strings. For example: "ticker": ["TCS.NS"]
 
 - "strategy": The name of the strategy (e.g., RSI)
 
@@ -97,20 +115,25 @@ To summarize:
 - When user specifies returns or stop-loss in percentage terms (e.g., "15% profit", "10% stop-loss"), include a "value_type": "percent" field in the condition JSON. 
   Default to absolute price (no value_type) if no percentage is mentioned.
 
-The user has provided the following backtest query:
+The user has provided the following backtest query: {user_query}
+    """
+    
+    # Call the LLM
+    response = llm.invoke([HumanMessage(content=prompt)])
 
-{query}
-"""
+    print("DEBUG — Raw LLM output before parsing:", response)
 
+    # Extract text output
+    text_output = response.content
+    print("Interpreter output (raw):", text_output)
 
-    messages = [
-        SystemMessage(
-            content=(
-                "You are an AI that extracts structured info from trading queries. And also interprets and calculates the time period (start_date, end_date) given in query and generates start_date and end_date accordingly.\n"
-                "Respond with JSON with keys: ticker, strategy, buy_condition, sell_condition, start_date, end_date."
-            )
-        ),
-        HumanMessage(content=prompt)
-    ]
-    response = llm.invoke(messages)
-    return {"intent": response.content}
+    # Optional: Try to split thoughts from structured query (for UI/logging)
+    if "Structured Query:" in text_output:
+        thoughts_text, _ = text_output.split("Structured Query:", 1)
+    else:
+        thoughts_text = text_output
+
+    # Use robust extractor to get JSON
+    structured_query_dict = extract_json_from_cot(text_output)
+
+    return thoughts_text.strip(), structured_query_dict

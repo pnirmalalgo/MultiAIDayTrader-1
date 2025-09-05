@@ -29,6 +29,6 @@ def clean_code(code: str) -> dict:
         HumanMessage(content=code)
     ]
     
-    response = llm.invoke(messages)
-    print("Code cleaned using LLM:", response.content)
-    return {"clean_code": response.content}
+    #response = llm.invoke(messages)
+    #print("Code cleaned using LLM:", response.content)
+    return {"clean_code": code}
