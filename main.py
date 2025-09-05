@@ -16,11 +16,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-
+from typing import Union, Dict, Any
 from celery.result import AsyncResult
 
 # your multi-agent/langgraph imports
-from agents.interpreter import interpret_query
+from agents.interpreter import interpreter_with_cot
 from agents.codegen import generate_code
 from agents.code_cleaner import clean_code
 from agents.ticker_lookup import resolve_ticker
@@ -41,10 +41,11 @@ os.makedirs(PLOTS_DIR, exist_ok=True)
 # -----------------------------
 class GraphState(TypedDict):
     input: str
-    intent: str
+    intent: Union[str, Dict[str, Any]]
     code: str
     clean_code: str
     execution_result: str
+    thoughts: list[str]
 
 class QueryRequest(BaseModel):
     query: str
@@ -55,6 +56,7 @@ class QueryRequest(BaseModel):
 def save_dataframe_to_sqlite(df: pd.DataFrame, db_name: str = "market_data.db", table_name: str = "stock_data"):
     conn = sqlite3.connect(db_name)
     df.to_sql(table_name, conn, if_exists="replace", index=False)
+    print(df)
     conn.close()
 
 def fetch_fmp_single_ticker(tkr: str, ticker_try: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -128,33 +130,83 @@ def get_fmp_stock_data(tickers, start_date: str, end_date: str) -> pd.DataFrame:
 # -----------------------------
 # LangGraph nodes
 # -----------------------------
+def node_interpreter_cot(state):
+    user_input = state["input"]
+    # Call interpreter with CoT support
+    thoughts, structured_query = interpreter_with_cot(user_input)  # cot=True enables CoT mode
+
+    print("DEBUG — structured_query:", structured_query)
+
+    # Return as dict, so LangGraph nodes can pick 'intent'
+    return {
+        "thoughts": thoughts,
+        "intent": structured_query  # keep same key as before for compatibility
+    }
+
 def node_interpreter(state):
     user_input = state["input"]
-    return interpret_query(user_input)
+    #return interpret_query(user_input)
 
 def node_ticker_lookup(state):
     try:
-        intent_json = state["intent"].replace("```json\n", "").replace("\n```", "")
-        parsed = json.loads(intent_json)
+        intent_raw = state["intent"]
+        print("Ticker lookup input (raw):", intent_raw)
+
+        if isinstance(intent_raw, dict):
+            parsed = intent_raw
+        elif isinstance(intent_raw, str):
+            intent_str = intent_raw.strip().replace("```json", "").replace("```", "").strip()
+            if not intent_str:
+                raise ValueError("Empty intent string")
+            parsed = json.loads(intent_str)
+        else:
+            raise ValueError(f"Unexpected intent format: {type(intent_raw)}")
+
+        if not isinstance(parsed, dict):
+            raise ValueError("Parsed intent is not a dict")
+
+        if "ticker" not in parsed:
+            raise ValueError("Structured query missing 'ticker' field")
+
         ticker_or_company = parsed["ticker"]
         resolved = resolve_ticker(ticker_or_company)
         parsed["ticker"] = resolved
-        return {"intent": json.dumps(parsed)}
+
+        return {"intent": parsed}
+
     except Exception as e:
+        print("Ticker lookup failed:", str(e))
         return {"intent": state.get("intent", ""), "error": str(e)}
 
 def node_codegen(state):
-    cleaned_content = state["intent"].replace("```json\n", "").replace("\n```", "")
-    parsed_query = json.loads(cleaned_content)
+
+    intent = state["intent"]
+
+    if isinstance(intent, str):
+        cleaned_content = intent.replace("```json\n", "").replace("\n```", "")
+        parsed_query = json.loads(cleaned_content)
+    elif isinstance(intent, dict):
+        parsed_query = intent
+        cleaned_content = json.dumps(parsed_query)  # for prompt input
+    else:
+        raise ValueError("Invalid intent format in node_codegen")
+
     tickers = parsed_query["ticker"]
     start_date = parsed_query["start_date"]
     end_date = parsed_query["end_date"]
-    _buy_condition = parsed_query.get("buy_condition")
-    _sell_condition = parsed_query.get("sell_condition")
 
-    # Fetch data and then call generate_code
+    # Fetch data
     stock_data = get_fmp_stock_data(tickers, start_date, end_date)
-    return generate_code(cleaned_content, stock_data)
+
+    # Generate code and CoT thoughts
+    result = generate_code(cleaned_content, stock_data)
+
+    # Return both code and thoughts for downstream use (cleaning, logging, etc.)
+    return {
+        "code": result["code"],
+        "thoughts": result.get("thoughts", [])
+    }
+
 
 def node_cleaner(state):
     return clean_code(state["code"])
@@ -168,7 +220,7 @@ def node_executor(state):
 # Build LangGraph
 # -----------------------------
 builder = StateGraph(GraphState)
-builder.add_node("interpreter", node_interpreter)
+builder.add_node("interpreter", node_interpreter_cot)
 builder.add_node("ticker_lookup", node_ticker_lookup)
 builder.add_node("codegen", node_codegen)
 builder.add_node("code_cleaner", node_cleaner)
@@ -199,6 +251,15 @@ fastapi_app.add_middleware(
 # Serve generated HTML files under /plots/* for iframe usage
 fastapi_app.mount("/plots", StaticFiles(directory=PLOTS_DIR), name="plots")
 
+#------interpreter-with-cot-------
+@fastapi_app.post("/api/interpret-query")
+async def interpret_query_endpoint(req: QueryRequest):
+    thoughts, structured_query = interpreter_with_cot(req.query)
+    return {
+        "thoughts": thoughts,
+        "structured_query": structured_query
+    }
+
 # ---- submit-query (queue task and return task_id) ----
 @fastapi_app.post("/api/submit-query")
 async def submit_query(req: QueryRequest):
@@ -227,17 +288,29 @@ async def submit_query(req: QueryRequest):
         if not task_id:
             return {"status": "ERROR", "error": "Could not parse Celery task id from pipeline output", "pipeline_result": execution_result}
 
-        return {"status": "PENDING", "task_id": task_id}
+        thoughts = final.get("thoughts", []) if isinstance(final, dict) else []
+        return {"status": "PENDING", "task_id": task_id, "thoughts": thoughts}
 
     except Exception as e:
         # don't crash the server; return error to frontend
         return {"status": "ERROR", "error": str(e)}
 
 # ---- task-status endpoint (single canonical) ----
+import logging
+import re
+import ast
+from fastapi import FastAPI
+from celery.result import AsyncResult
+
 @fastapi_app.get("/api/task-status/{task_id}")
 async def task_status(task_id: str):
     async_result = AsyncResult(task_id, app=celery_app)
     state = async_result.state
+    meta = async_result.info or {}
+    if isinstance(meta, dict):
+        logs = meta.get("logs", [])
+    else:
+        logs = []
 
     if state == "SUCCESS":
         res = async_result.result
@@ -249,10 +322,12 @@ async def task_status(task_id: str):
         if isinstance(res, dict):
             files = res.get("files") or res.get("html_files") or []
             output = res.get("output", "")
+            # Also include logs returned from the task result if present
+            logs = res.get("logs", logs)
         else:
             output = str(res)
 
-        # --- NEW: fallback parser for "Generated files: ['...']"
+        # --- Fallback parser for "Generated files: ['...']" in output text
         if not files and output:
             m = re.search(r"Generated files:\s*(\[.*\])", output)
             if m:
@@ -264,21 +339,26 @@ async def task_status(task_id: str):
                 except Exception:
                     logging.exception("Failed to parse Generated files from output")
 
-        return {"status": "SUCCESS", "files": files}
+        return {
+            "status": "SUCCESS",
+            "files": files,
+            "logs": logs,
+            "output": output,
+        }
 
     elif state == "FAILURE":
         err = async_result.result
-        return {"status": "FAILURE", "error": str(err)}
+        return {
+            "status": "FAILURE",
+            "error": str(err),
+            "logs": logs,
+        }
 
-    meta = async_result.info or {}
-    logs = meta.get("logs", [])
-    return {"status": state, "logs": logs}
-
-    # For ongoing states return state (PENDING/PROGRESS/STARTED)
-    # If the worker updates meta logs, include them for frontend visibility
-    meta = async_result.info or {}
-    logs = meta.get("logs", [])
-    return {"status": state, "logs": logs}
+    # For ongoing states like PENDING or PROGRESS
+    return {
+        "status": state,
+        "logs": logs,
+    }
 
 # ---- optional: list all html files under PLOTS_DIR ----
 @fastapi_app.get("/api/list-html")

@@ -19,7 +19,7 @@ def generate_code(intent_json: str, stock_data: pd.DataFrame) -> dict:
     print(intent_json)
     parsed = json.loads(intent_json)
     ticker = parsed.get("ticker")
-    
+
     strategy = parsed.get("strategy_description", "")
     buy_condition = parsed.get("buy_condition", "")
     sell_condition = parsed.get("sell_condition", "")
@@ -27,9 +27,55 @@ def generate_code(intent_json: str, stock_data: pd.DataFrame) -> dict:
     duration_type = parsed.get("duration_type", "")
     duration_days = int(parsed.get("duration_days", 0))
 
-    # Convert the JSON to a string to pass into the prompt
-    intent_json_str = json.dumps(intent_json)
+
+    format_example = """
+    Here’s the required format:
+
+    ---THOUGHTS---
+    First, I will load the stock data from SQLite using pandas.read_sql().
+    Next, I will compute the 14-day RSI using ta.momentum.RSIIndicator.
+    The buy condition is RSI < 30, which suggests the stock is oversold.
+    The sell condition is RSI > 70, which signals overbought.
+
+    I'll loop through each ticker individually, generate buy/sell signals on crossovers, and track positions.
+    Finally, I’ll plot the results and save them to HTML.
+
+    ---CODE---
+    # actual code starts here...
+    """
+
+    # This is the only instruction prompt we are sending now — minimalist
     prompt = f"""
+Given the following intent, first explain your reasoning step by step under ---THOUGHTS---, 
+and then write executable Python code under ---CODE---.
+
+{format_example}
+
+Use only pandas and ta. Do not fetch data from the internet. Use SQLite3 and read data using pandas.read_sql().
+Data is stored in a SQLite database named market_data.db and table: stock_data.
+
+---INTENT---
+{intent_json}
+
+---THOUGHTS---
+
+---COT Instructions---
+Think step by step:
+
+1. Understand the problem: What is the goal of the task?
+
+2. Break down the requirements: What inputs/outputs are expected? Are there any constraints?
+
+3. Design a plan: How should we approach the problem? What functions or data structures will we use?
+
+4. Write pseudocode: Sketch a high-level version of the logic.
+
+5. Translate to actual code: Implement the logic in [desired language].
+
+6. Test the code: Include sample input/output to verify correctness.
+------------------------------
+
+Instructions:
 Write Python code to implement the following stock trading strategy.
 
 Ensure the output is ONLY executable Python code — no comments, no markdown, no pip install, and NO code fences like ```python.
@@ -428,27 +474,32 @@ DEBUGGING + STABILITY
 39. Keep all per-ticker logic self-contained in the loop.
 40. All extracted price series must inherit the datetime index from ticker_data — do not reindex manually.
 
+
 """
 
-          
-    print(prompt)
-    messages = [
-        SystemMessage(content="Write simple python code. Do not use yfinance. VERY IMP: DO NOT include'''python. '''python causes code to break. Required data is stored in SQLite3 table provided in the query. Use the ta library, importing MACD from ta.trend and RSI from ta.momentum if needed. Initialize ta class."\
-                      "Include required libraries eg. numpy. Initialize ta class properly. Use: from ta.momentum import RSIIndicator. Please note: DO NOT use ta.add_all_ta_features(This is not required and gives error). "\
-                      "DO NOT include any comments. Only executable python code. Print output as per instructions." \
-                      "The generated Python code must be compatible with pandas 2.0+."\
-                      "Replace any usage of the deprecated Series.append() or DataFrame.append() with pd.concat([obj1, obj2])." \
-                      "When generating code that creates signal lists (e.g., Buy/Sell, Long/Short), ensure the lists are exactly the same length as the DataFrame index."\
-                      "Always start the lists pre-filled with np.nan for all rows (e.g., [np.nan] * len(data)) or append values for every iteration so the final list length equals len(data)."\
-                      "Do not start loops at range(1, len(data)) unless you also pre-fill the first element(s) to keep lengths equal."\
-                      "Before assigning to data['column'], validate that len(list) == len(data)."\
-                      "The fix must be generic so it works for MACD, RSI, SMA, or any other indicator as applicable."\
-                      "Add checks whereever necessary to see if there is no data before accessing data."
-                      ),
-        HumanMessage(content=prompt)
-    ]
     
 
+    messages = [
+        SystemMessage(content="You're a trading algorithm assistant. Reason step by step, then write working code. Do not use markdown or code fences."),
+        HumanMessage(content=prompt)
+    ]
+
     response = llm.invoke(messages)
-    print("Generated code: ",response.content)
-    return {"code": response.content}
+
+    # Split CoT and code
+    raw = response.content
+    if "---CODE---" in raw:
+        thoughts_part, code_part = raw.split("---CODE---", 1)
+        thoughts_part = thoughts_part.replace("---THOUGHTS---", "").strip()
+    else:
+        thoughts_part = ""
+        code_part = raw.strip()
+
+    # Debug print (optional)
+    print("Generated thoughts:\n", thoughts_part)
+    print("Generated code:\n", code_part)
+
+    return {
+        "code": code_part,
+        "thoughts": [line.strip() for line in thoughts_part.splitlines() if line.strip()]
+    }
