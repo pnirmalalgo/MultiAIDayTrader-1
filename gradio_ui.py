@@ -1,52 +1,106 @@
-# gradio_ui.py
 import gradio as gr
-import json
 import requests
-
-from agents.interpreter import interpreter_with_cot  # your CoT-enabled interpreter
 import time
+import json
 
 API_TASK_STATUS_URL = "http://127.0.0.1:8000/api/task-status"
 API_SUBMIT_URL = "http://127.0.0.1:8000/api/submit-query"
 API_LIST_HTML_URL = "http://127.0.0.1:8000/api/list-html"
 
-def on_confirm_click(structured_query_dict):
+# -----------------------------------------
+# Submit initial user query to Orchestrator
+# -----------------------------------------
+def submit_query_to_orchestrator(user_input):
     try:
-        payload = {"query": json.dumps(structured_query_dict)}
+        payload = {"query": user_input}
         resp = requests.post(API_SUBMIT_URL, json=payload)
         result = resp.json()
 
-        if not result.get("task_id"):
-            return f"Error submitting query: {result.get('error')}", "", [], gr.update(visible=True)
+        thoughts = result.get("thoughts", [])
+        status = result.get("status", "")
+        structured_query = result.get("structured_query", {})
 
-        task_id = result["task_id"]
-        thoughts = result.get("thoughts", [])  # ✅ Get actual CoT thoughts
+        # Format Chain of Thought (CoT)
+        cot_text = "\n".join(
+            f"[{t['role'].upper()} - {t['type']}] {t['content']}" for t in thoughts
+        )
 
-        # --- Poll for completion ---
-        status = "PENDING"
-        files = []
+        if status == "CLARIFY":
+            question = result.get("question", "Is this interpretation correct?")
+            status_msg = f"[CLARIFICATION] {question}"
+            return cot_text, structured_query, status_msg, gr.update(visible=True), gr.update(visible=True)
+
+
+        elif status == "PENDING":
+            task_id = result.get("task_id")
+            status_msg = f"Task submitted with ID: {task_id}"
+            return cot_text, {}, status_msg, gr.update(visible=False), gr.update(visible=False)
+
+
+        else:
+            return cot_text, {}, f"Unexpected status: {status}", gr.update(visible=False), gr.update(visible=False)
+
+
+    except Exception as e:
+        return "", {}, f"Exception: {str(e)}", gr.update(visible=False)
+
+
+# -----------------------------------------
+# When user confirms interpretation
+# -----------------------------------------
+def on_user_confirms_interpretation(structured_query_dict):
+    try:
+        payload = {
+            "query": "CONFIRMED",
+            "structured_query": structured_query_dict
+        }
+        resp = requests.post(API_SUBMIT_URL, json=payload)
+        result = resp.json()
+
+        task_id = result.get("task_id")
+        thoughts = result.get("thoughts", [])
+        cot_text = "\n".join(
+            f"[{t['role'].upper()} - {t['type']}] {t['content']}" for t in thoughts
+        )
+
+        if not task_id:
+            return f"Error: No task_id returned.\n{cot_text}", ""
+
+        # Start polling
+        iframe_html, final_status = poll_task_status(task_id)
+        return cot_text + "\n" + final_status, iframe_html
+
+    except Exception as e:
+        return f"Exception during confirmation: {str(e)}", ""
+
+
+# -----------------------------------------
+# Poll task status and show result
+# -----------------------------------------
+def poll_task_status(task_id):
+    try:
         max_attempts = 20
-        delay = 1.5  # seconds
+        delay = 1.5
+        files = []
 
         for _ in range(max_attempts):
-            status_resp = requests.get(f"{API_TASK_STATUS_URL}/{task_id}")
-            status_data = status_resp.json()
-            print("DEBUG — Task status data:", status_data)
+            resp = requests.get(f"{API_TASK_STATUS_URL}/{task_id}")
+            status_data = resp.json()
             status = status_data.get("status", "")
             if status == "SUCCESS":
-                print("DEBUG — Task completed successfully.")
                 files = status_data.get("files", [])
-                print("DEBUG — Files returned:", files)
+                if "trading_results.html" not in files:
+                    files.append("trading_results.html")
                 break
             elif status == "FAILURE":
-                return f"Task failed: {status_data.get('error', 'Unknown error')}", "", thoughts, gr.update(visible=False)
+                return "", f"Task failed: {status_data.get('error', 'Unknown error')}"
             else:
                 time.sleep(delay)
 
         if not files:
-            return f"Task completed but no files found.", "", thoughts, gr.update(visible=False)
+            return "", "Task completed but no files found."
 
-        # --- Build iframe HTML for returned files only ---
+        # HTML for plots
         iframe_html = ""
         for file in files:
             iframe_html += f"""
@@ -56,12 +110,15 @@ def on_confirm_click(structured_query_dict):
                         style="border: 1px solid #ccc; border-radius: 8px;"></iframe>
                 </div>
             """
-
-        return f"Query submitted! Task ID: {task_id}", iframe_html, thoughts, gr.update(visible=False)
+        return iframe_html, "Task completed successfully."
 
     except Exception as e:
-        return f"Exception: {str(e)}", "", [], gr.update(visible=True)
-   
+        return "", f"Exception polling task status: {str(e)}"
+
+
+# -----------------------------------------
+# Flag bad queries for review
+# -----------------------------------------
 def on_flag_click(structured_query_dict):
     try:
         with open("flagged_queries.jsonl", "a") as f:
@@ -70,6 +127,10 @@ def on_flag_click(structured_query_dict):
     except Exception as e:
         return f"Exception: {str(e)}"
 
+
+# -----------------------------------------
+# List existing plots
+# -----------------------------------------
 def list_plots():
     try:
         resp = requests.get(API_LIST_HTML_URL)
@@ -78,7 +139,6 @@ def list_plots():
         if not files:
             return "<p>No plots found.</p>"
 
-        # Create iframes for each HTML file
         iframe_html = ""
         for file in files:
             iframe_html += f"""
@@ -89,64 +149,67 @@ def list_plots():
                 </div>
             """
         return iframe_html
-
     except Exception as e:
         return f"<p>Error fetching plot list: {str(e)}</p>"
 
-# -----------------------------
-# Gradio UI
-# -----------------------------
-with gr.Blocks() as demo:
 
+# -----------------------------------------
+# Gradio UI
+# -----------------------------------------
+with gr.Blocks() as demo:
     gr.Markdown("## 🧠 Trading Query Interpreter with Chain of Thoughts")
 
-    # Input
     user_input = gr.Textbox(
         label="Enter Trading Query",
         placeholder="E.g., Show me RSI trades for SBIN.NS from Jan 2025 to Mar 2025"
     )
 
-    # Outputs
     cot_output = gr.Textbox(label="Chain of Thoughts", lines=10)
-    structured_query_output = gr.JSON(label="Structured Query (editable)")
+    structured_query_output = gr.JSON(label="Structured Query (editable)", visible=True)
+
     status_output = gr.Textbox(label="Status / Task ID")
     iframe_display = gr.HTML(label="Generated Plots")
 
-    # Buttons
-    generate_btn = gr.Button("Generate CoT & Structured Query")
-    confirm_btn = gr.Button("Confirm & Submit")
-    flag_btn = gr.Button("Flag for Review")
+    submit_btn = gr.Button("Submit Query")
+    confirm_btn = gr.Button("✅ Confirm Interpretation", visible=False)
+    flag_btn = gr.Button("🚩 Flag for Review")
     refresh_btn = gr.Button("🔄 Refresh Plots")
 
-    # Callbacks
-    generate_btn.click(
-        fn=interpreter_with_cot,
+    # Submit user query
+    submit_btn.click(
+        fn=submit_query_to_orchestrator,
         inputs=user_input,
-        outputs=[cot_output, structured_query_output]
+        outputs=[
+            cot_output,
+            structured_query_output,
+            status_output,
+            confirm_btn,
+            structured_query_output,  # <-- added to allow hiding on submit
+        ],
     )
 
+    # Confirm structured query
     confirm_btn.click(
-        fn=on_confirm_click,
+        fn=on_user_confirms_interpretation,
         inputs=structured_query_output,
         outputs=[
-            status_output,     # Status / Task ID
-            iframe_display,    # HTML plots
-            cot_output,        # Chain of Thought
-            structured_query_output  # 👈 Update visibility
-        ]
+            status_output,
+            iframe_display,
+        ],
     )
 
+    # Flag bad interpretation
     flag_btn.click(
         fn=on_flag_click,
         inputs=structured_query_output,
-        outputs=status_output
+        outputs=status_output,
     )
 
+    # Refresh plot list
     refresh_btn.click(
         fn=list_plots,
         inputs=[],
-        outputs=iframe_display
+        outputs=iframe_display,
     )
 
-# Launch Gradio UI
 demo.launch()

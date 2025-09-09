@@ -7,24 +7,22 @@ import pandas as pd
 import requests
 import urllib.parse
 from dotenv import load_dotenv
-from typing import TypedDict
-import re      # ✅ missing
-import ast     # ✅ missing
-import logging  # ✅ missing
+from typing import TypedDict, Union, Dict, Any, Optional, List
+import re
+import ast
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from typing import Union, Dict, Any
 from celery.result import AsyncResult
 
-# your multi-agent/langgraph imports
-from agents.interpreter import interpreter_with_cot
-from agents.codegen import generate_code
-from agents.code_cleaner import clean_code
-from agents.ticker_lookup import resolve_ticker
-from langgraph.graph import StateGraph, END
+# Import your OrchestratorAgent instead of LangGraph pipeline
+from agents.orchestrator import OrchestratorAgent
+from agents.interpreter import interpret_query_mcp
+# from agents.codegen import generate_code --- IGNORE ---
+from agents.codegen import codegen_mcp
 
 # Celery app + task
 from tasks.executor import app as celery_app
@@ -33,207 +31,20 @@ from tasks.executor import run_python_code  # Celery task
 # -----------------------------
 # Config
 # -----------------------------
-PLOTS_DIR = os.path.abspath(".")  # directory where .html plots are written
+PLOTS_DIR = os.path.abspath(".")
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
 # -----------------------------
 # Types & Models
 # -----------------------------
-class GraphState(TypedDict):
-    input: str
-    intent: Union[str, Dict[str, Any]]
-    code: str
-    clean_code: str
-    execution_result: str
-    thoughts: list[str]
-
 class QueryRequest(BaseModel):
     query: str
+    structured_query: Optional[Dict[str, Any]] = None
 
 # -----------------------------
-# Utilities
+# Initialize orchestrator
 # -----------------------------
-def save_dataframe_to_sqlite(df: pd.DataFrame, db_name: str = "market_data.db", table_name: str = "stock_data"):
-    conn = sqlite3.connect(db_name)
-    df.to_sql(table_name, conn, if_exists="replace", index=False)
-    print(df)
-    conn.close()
-
-def fetch_fmp_single_ticker(tkr: str, ticker_try: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    Fetch historical data for a single ticker_try from FMP.
-    Returns empty DataFrame on no-data or HTTP error.
-    """
-    load_dotenv()
-    FMP_API_KEY = os.getenv("FMP_API_KEY")
-    FMP_BASE_URL = "https://financialmodelingprep.com/api/v3"
-    url = f"{FMP_BASE_URL}/historical-price-full/{urllib.parse.quote(ticker_try)}"
-    params = {"from": start_date, "to": end_date, "apikey": FMP_API_KEY}
-
-    resp = requests.get(url, params=params, timeout=15)
-    if resp.status_code != 200:
-        # return empty DataFrame (caller will try other suffixes)
-        print(f"HTTP Error {resp.status_code} for {ticker_try}")
-        return pd.DataFrame()
-
-    data = resp.json()
-    if "historical" not in data or not data["historical"]:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(data["historical"])
-    df.rename(columns={
-        "date": "Date",
-        "close": "Close",
-        "open": "Open",
-        "high": "High",
-        "low": "Low",
-        "volume": "Volume",
-        "adjClose": "Adj Close" if "adjClose" in df.columns else "Close"
-    }, inplace=True)
-
-    keep_cols = [c for c in ["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"] if c in df.columns]
-    df = df[keep_cols]
-    df["Ticker"] = tkr
-    return df
-
-def get_fmp_stock_data(tickers, start_date: str, end_date: str) -> pd.DataFrame:
-    """
-    Fetch data for a list or comma-separated string of tickers.
-    Raises RuntimeError if nothing fetched.
-    """
-    # normalize tickers
-    if isinstance(tickers, str):
-        tickers = [t.strip() for t in tickers.split(",")]
-    elif not isinstance(tickers, list):
-        raise ValueError("Tickers must be string or list")
-
-    dfs = []
-    for tkr in tickers:
-        found = False
-        for suffix in [".NS", ".BS", ""]:
-            ticker_try = tkr + suffix if suffix else tkr
-            df = fetch_fmp_single_ticker(tkr, ticker_try, start_date, end_date)
-            if not df.empty:
-                dfs.append(df)
-                found = True
-                break
-        if not found:
-            print(f"No data found for {tkr} with any suffix")
-
-    if not dfs:
-        raise RuntimeError("No data fetched for any ticker.")
-
-    final_df = pd.concat(dfs, ignore_index=True)
-    save_dataframe_to_sqlite(final_df)
-    return final_df
-
-# -----------------------------
-# LangGraph nodes
-# -----------------------------
-def node_interpreter_cot(state):
-    user_input = state["input"]
-    # Call interpreter with CoT support
-    thoughts, structured_query = interpreter_with_cot(user_input)  # cot=True enables CoT mode
-
-    print("DEBUG — structured_query:", structured_query)
-
-    # Return as dict, so LangGraph nodes can pick 'intent'
-    return {
-        "thoughts": thoughts,
-        "intent": structured_query  # keep same key as before for compatibility
-    }
-
-def node_interpreter(state):
-    user_input = state["input"]
-    #return interpret_query(user_input)
-
-def node_ticker_lookup(state):
-    try:
-        intent_raw = state["intent"]
-        print("Ticker lookup input (raw):", intent_raw)
-
-        if isinstance(intent_raw, dict):
-            parsed = intent_raw
-        elif isinstance(intent_raw, str):
-            intent_str = intent_raw.strip().replace("```json", "").replace("```", "").strip()
-            if not intent_str:
-                raise ValueError("Empty intent string")
-            parsed = json.loads(intent_str)
-        else:
-            raise ValueError(f"Unexpected intent format: {type(intent_raw)}")
-
-        if not isinstance(parsed, dict):
-            raise ValueError("Parsed intent is not a dict")
-
-        if "ticker" not in parsed:
-            raise ValueError("Structured query missing 'ticker' field")
-
-        ticker_or_company = parsed["ticker"]
-        resolved = resolve_ticker(ticker_or_company)
-        parsed["ticker"] = resolved
-
-        return {"intent": parsed}
-
-    except Exception as e:
-        print("Ticker lookup failed:", str(e))
-        return {"intent": state.get("intent", ""), "error": str(e)}
-
-def node_codegen(state):
-
-    intent = state["intent"]
-
-    if isinstance(intent, str):
-        cleaned_content = intent.replace("```json\n", "").replace("\n```", "")
-        parsed_query = json.loads(cleaned_content)
-    elif isinstance(intent, dict):
-        parsed_query = intent
-        cleaned_content = json.dumps(parsed_query)  # for prompt input
-    else:
-        raise ValueError("Invalid intent format in node_codegen")
-
-    tickers = parsed_query["ticker"]
-    start_date = parsed_query["start_date"]
-    end_date = parsed_query["end_date"]
-
-    # Fetch data
-    stock_data = get_fmp_stock_data(tickers, start_date, end_date)
-
-    # Generate code and CoT thoughts
-    result = generate_code(cleaned_content, stock_data)
-
-    # Return both code and thoughts for downstream use (cleaning, logging, etc.)
-    return {
-        "code": result["code"],
-        "thoughts": result.get("thoughts", [])
-    }
-
-
-def node_cleaner(state):
-    return clean_code(state["code"])
-
-def node_executor(state):
-    # queue Celery task with the cleaned code
-    result = run_python_code.delay(state["clean_code"])
-    return {"execution_result": f"Task submitted: {result.id}"}
-
-# -----------------------------
-# Build LangGraph
-# -----------------------------
-builder = StateGraph(GraphState)
-builder.add_node("interpreter", node_interpreter_cot)
-builder.add_node("ticker_lookup", node_ticker_lookup)
-builder.add_node("codegen", node_codegen)
-builder.add_node("code_cleaner", node_cleaner)
-builder.add_node("executor", node_executor)
-
-builder.set_entry_point("interpreter")
-builder.add_edge("interpreter", "ticker_lookup")
-builder.add_edge("ticker_lookup", "codegen")
-builder.add_edge("codegen", "code_cleaner")
-builder.add_edge("code_cleaner", "executor")
-builder.add_edge("executor", END)
-
-langgraph_app = builder.compile()
+orchestrator_agent = OrchestratorAgent()
 
 # -----------------------------
 # FastAPI app
@@ -248,60 +59,42 @@ fastapi_app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve generated HTML files under /plots/* for iframe usage
+# Serve generated HTML files under /plots/*
 fastapi_app.mount("/plots", StaticFiles(directory=PLOTS_DIR), name="plots")
 
-#------interpreter-with-cot-------
+# Interpreter endpoint (same as before)
 @fastapi_app.post("/api/interpret-query")
 async def interpret_query_endpoint(req: QueryRequest):
-    thoughts, structured_query = interpreter_with_cot(req.query)
+    thoughts, structured_query = interpret_query_mcp({"query": req.query})
     return {
         "thoughts": thoughts,
         "structured_query": structured_query
     }
 
-# ---- submit-query (queue task and return task_id) ----
+# New submit-query endpoint using OrchestratorAgent
 @fastapi_app.post("/api/submit-query")
 async def submit_query(req: QueryRequest):
     """
-    Run the LangGraph pipeline which will eventually enqueue a Celery task.
-    Returns the Celery task id so the frontend can poll /api/task-status/<id>.
+    Handles both:
+    1. Normal query interpretation (user_query only)
+    2. Confirmed structured query (skip interpreter)
     """
     try:
-        # run the graph synchronously (it will call node_executor which enqueues Celery)
-        final = langgraph_app.invoke({"input": req.query})
+        if req.structured_query:
+            # ✅ Let orchestrator handle codegen + execution + CoT logging
+            result = orchestrator_agent.execute_confirmed_query(req.structured_query)
+            print("DEBUG result from code generation:", result)
+            return result
 
-        # LangGraph node_executor returns {"execution_result": "Task submitted: <id>"}
-        execution_result = final.get("execution_result", "") if isinstance(final, dict) else ""
-        if not execution_result:
-            # As fallback, try to extract from different structure
-            execution_result = final
-
-        # parse the result like "Task submitted: <id>"
-        task_id = None
-        if isinstance(execution_result, str):
-            if ":" in execution_result:
-                task_id = execution_result.split(":", 1)[1].strip()
-            else:
-                task_id = execution_result.strip()
-
-        if not task_id:
-            return {"status": "ERROR", "error": "Could not parse Celery task id from pipeline output", "pipeline_result": execution_result}
-
-        thoughts = final.get("thoughts", []) if isinstance(final, dict) else []
-        return {"status": "PENDING", "task_id": task_id, "thoughts": thoughts}
+        # Normal flow: use orchestrator agent
+        result = orchestrator_agent.run(req.query)
+        return result
 
     except Exception as e:
-        # don't crash the server; return error to frontend
+        logging.exception("Error in submit-query")
         return {"status": "ERROR", "error": str(e)}
 
-# ---- task-status endpoint (single canonical) ----
-import logging
-import re
-import ast
-from fastapi import FastAPI
-from celery.result import AsyncResult
-
+# Task status endpoint (unchanged)
 @fastapi_app.get("/api/task-status/{task_id}")
 async def task_status(task_id: str):
     async_result = AsyncResult(task_id, app=celery_app)
@@ -322,12 +115,11 @@ async def task_status(task_id: str):
         if isinstance(res, dict):
             files = res.get("files") or res.get("html_files") or []
             output = res.get("output", "")
-            # Also include logs returned from the task result if present
             logs = res.get("logs", logs)
         else:
             output = str(res)
 
-        # --- Fallback parser for "Generated files: ['...']" in output text
+        # Fallback parsing for generated files in output string
         if not files and output:
             m = re.search(r"Generated files:\s*(\[.*\])", output)
             if m:
@@ -360,7 +152,7 @@ async def task_status(task_id: str):
         "logs": logs,
     }
 
-# ---- optional: list all html files under PLOTS_DIR ----
+# List all html files for plots
 @fastapi_app.get("/api/list-html")
 def list_html_files():
     try:
@@ -369,7 +161,7 @@ def list_html_files():
     except Exception as e:
         return {"files": [], "error": str(e)}
 
-# ---- serve a single html file (if needed) ----
+# Serve a single html file
 @fastapi_app.get("/api/html/{file_name}")
 def get_html(file_name: str):
     file_path = os.path.join(PLOTS_DIR, file_name)
@@ -377,12 +169,10 @@ def get_html(file_name: str):
         return FileResponse(file_path, media_type="text/html")
     return {"error": "File not found"}
 
-# -----------------------------
 # Run standalone (dev)
-# -----------------------------
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(fastapi_app, host="127.0.0.1", port=8000, reload=True)
 
-# expose app for ASGI
+# Expose ASGI app
 app = fastapi_app
