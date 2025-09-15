@@ -25,54 +25,117 @@ def submit_query_to_orchestrator(user_input):
             f"[{t['role'].upper()} - {t['type']}] {t['content']}" for t in thoughts
         )
 
+        structured_query_str = json.dumps(structured_query, indent=2)
+
         if status == "CLARIFY":
             question = result.get("question", "Is this interpretation correct?")
             status_msg = f"[CLARIFICATION] {question}"
-            return cot_text, structured_query, status_msg, gr.update(visible=True), gr.update(visible=True)
-
+            return (
+                cot_text,
+                structured_query_str,
+                status_msg,
+                gr.update(visible=True),    # confirm_btn
+                gr.update(visible=True),    # reject_btn
+                gr.update(visible=False),   # flag_btn
+                gr.update(visible=False),   # submit_btn
+                gr.update(visible=True),    # cot_output
+                gr.update(visible=True)     # structured_query_output
+            )
 
         elif status == "PENDING":
             task_id = result.get("task_id")
             status_msg = f"Task submitted with ID: {task_id}"
-            return cot_text, {}, status_msg, gr.update(visible=False), gr.update(visible=False)
-
+            return (
+                cot_text,
+                structured_query_str,
+                status_msg,
+                gr.update(visible=False),   # confirm_btn
+                gr.update(visible=False),   # reject_btn
+                gr.update(visible=False),   # flag_btn
+                gr.update(visible=False),   # submit_btn
+                gr.update(visible=True),    # cot_output
+                gr.update(visible=True)     # structured_query_output
+            )
 
         else:
-            return cot_text, {}, f"Unexpected status: {status}", gr.update(visible=False), gr.update(visible=False)
-
+            return (
+                cot_text,
+                structured_query_str,
+                f"Unexpected status: {status}",
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(visible=False),
+                gr.update(visible=True),
+                gr.update(visible=True)
+            )
 
     except Exception as e:
-        return "", {}, f"Exception: {str(e)}", gr.update(visible=False)
+        return (
+            "",
+            "{}",
+            f"Exception: {str(e)}",
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=False),
+            gr.update(visible=True),
+            gr.update(visible=True)
+        )
 
+# -----------------------------------------
+# When user rejects interpretation
+# -----------------------------------------
+def on_user_rejects_interpretation(structured_query_str):
+    try:
+        structured_query = json.loads(structured_query_str) if structured_query_str else {}
+    except Exception:
+        structured_query = {}
+
+    payload = {
+        "query": "REJECTED",
+        "structured_query": structured_query
+    }
+    resp = requests.post(API_SUBMIT_URL, json=payload)
+    result = resp.json()
+
+    return (
+        f"Interpretation rejected. Please rephrase your query.\n{result.get('question','')}",
+        "",  # clear iframe
+        gr.update(visible=False),
+        gr.update(visible=False),
+        gr.update(visible=False),
+        gr.update(visible=False)
+    )
 
 # -----------------------------------------
 # When user confirms interpretation
 # -----------------------------------------
-def on_user_confirms_interpretation(structured_query_dict):
+def on_user_confirms_interpretation(structured_query_str, cot_text):
     try:
-        payload = {
-            "query": "CONFIRMED",
-            "structured_query": structured_query_dict
-        }
-        resp = requests.post(API_SUBMIT_URL, json=payload)
-        result = resp.json()
-
-        task_id = result.get("task_id")
-        thoughts = result.get("thoughts", [])
-        cot_text = "\n".join(
-            f"[{t['role'].upper()} - {t['type']}] {t['content']}" for t in thoughts
-        )
-
-        if not task_id:
-            return f"Error: No task_id returned.\n{cot_text}", ""
-
-        # Start polling
-        iframe_html, final_status = poll_task_status(task_id)
-        return cot_text + "\n" + final_status, iframe_html
-
+        structured_query = json.loads(structured_query_str) if structured_query_str else {}
     except Exception as e:
-        return f"Exception during confirmation: {str(e)}", ""
+        return f"❌ Invalid JSON in structured query: {e}", ""
 
+    payload = {
+        "query": "CONFIRMED",
+        "structured_query": structured_query,
+        "cot": cot_text
+    }
+    resp = requests.post(API_SUBMIT_URL, json=payload)
+    result = resp.json()
+
+    task_id = result.get("task_id")
+    thoughts = result.get("thoughts", [])
+    cot_text = "\n".join(
+        f"[{t['role'].upper()} - {t['type']}] {t['content']}" for t in thoughts
+    )
+
+    if not task_id:
+        return f"Error: No task_id returned.\n{cot_text}", ""
+
+    iframe_html, final_status = poll_task_status(task_id)
+    return cot_text + "\n" + final_status, iframe_html
 
 # -----------------------------------------
 # Poll task status and show result
@@ -100,7 +163,6 @@ def poll_task_status(task_id):
         if not files:
             return "", "Task completed but no files found."
 
-        # HTML for plots
         iframe_html = ""
         for file in files:
             iframe_html += f"""
@@ -115,18 +177,17 @@ def poll_task_status(task_id):
     except Exception as e:
         return "", f"Exception polling task status: {str(e)}"
 
-
 # -----------------------------------------
-# Flag bad queries for review
+# Flag bad queries
 # -----------------------------------------
-def on_flag_click(structured_query_dict):
+def on_flag_click(structured_query_str):
     try:
+        structured_query = json.loads(structured_query_str) if structured_query_str else {}
         with open("flagged_queries.jsonl", "a") as f:
-            f.write(json.dumps(structured_query_dict) + "\n")
+            f.write(json.dumps(structured_query) + "\n")
         return "Query flagged for review!"
     except Exception as e:
         return f"Exception: {str(e)}"
-
 
 # -----------------------------------------
 # List existing plots
@@ -152,7 +213,6 @@ def list_plots():
     except Exception as e:
         return f"<p>Error fetching plot list: {str(e)}</p>"
 
-
 # -----------------------------------------
 # Gradio UI
 # -----------------------------------------
@@ -164,18 +224,40 @@ with gr.Blocks() as demo:
         placeholder="E.g., Show me RSI trades for SBIN.NS from Jan 2025 to Mar 2025"
     )
 
-    cot_output = gr.Textbox(label="Chain of Thoughts", lines=10)
-    structured_query_output = gr.JSON(label="Structured Query (editable)", visible=True)
+    cot_output = gr.Textbox(label="Chain of Thoughts (editable)", lines=10, interactive=True)
+
+    structured_query_output = gr.State()
+    """
+    gr.Code(
+        label="Structured Query (editable JSON)",
+        language="json",
+        interactive=True,
+        visible=True
+    )
+    """
 
     status_output = gr.Textbox(label="Status / Task ID")
     iframe_display = gr.HTML(label="Generated Plots")
 
     submit_btn = gr.Button("Submit Query")
     confirm_btn = gr.Button("✅ Confirm Interpretation", visible=False)
-    flag_btn = gr.Button("🚩 Flag for Review")
-    refresh_btn = gr.Button("🔄 Refresh Plots")
+    reject_btn = gr.Button("❌ Reject Interpretation", visible=False)
+    flag_btn = gr.Button("🚩 Flag for Review", visible=False)
+    refresh_btn = gr.Button("🔄 Refresh Plots", visible=False)
 
-    # Submit user query
+    reject_btn.click(
+        fn=on_user_rejects_interpretation,
+        inputs=structured_query_output,
+        outputs=[
+            status_output,
+            iframe_display,
+            confirm_btn,
+            structured_query_output,
+            cot_output,
+            reject_btn
+        ],
+    )
+    
     submit_btn.click(
         fn=submit_query_to_orchestrator,
         inputs=user_input,
@@ -184,28 +266,26 @@ with gr.Blocks() as demo:
             structured_query_output,
             status_output,
             confirm_btn,
-            structured_query_output,  # <-- added to allow hiding on submit
+            reject_btn,
+            flag_btn,
+            submit_btn,
+            cot_output,
+            structured_query_output
         ],
     )
 
-    # Confirm structured query
     confirm_btn.click(
         fn=on_user_confirms_interpretation,
-        inputs=structured_query_output,
-        outputs=[
-            status_output,
-            iframe_display,
-        ],
+        inputs=[structured_query_output, cot_output],
+        outputs=[status_output, iframe_display],
     )
 
-    # Flag bad interpretation
     flag_btn.click(
         fn=on_flag_click,
         inputs=structured_query_output,
         outputs=status_output,
     )
 
-    # Refresh plot list
     refresh_btn.click(
         fn=list_plots,
         inputs=[],

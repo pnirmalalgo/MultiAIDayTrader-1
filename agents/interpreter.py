@@ -63,6 +63,11 @@ Use the following schema for each condition:
     - Combine with other sell conditions using logical OR.
     - Reset entry price when position is closed.
 - This ensures each trade has its own thresholds applied individually.
+###IMPORTANT###
+- Apply strategy default rules (e.g., RSI: buy<30, sell>70) **only if the user query does NOT specify explicit buy or sell thresholds**.
+- Do NOT add or merge stop-loss / take-profit or any default sell conditions unless the user explicitly mentions them in the query.
+- If the user specifies any sell conditions, use exactly those conditions and do not add any additional default rules.
+- Only merge default stop-loss / take-profit conditions with user sell conditions **if the user explicitly requested them**.
 
 Example:
 Input: "Buy when MACD is positive and RSI between 40 and 60, sell when MACD is negative or 15% profit or 5% stop-loss"
@@ -90,10 +95,11 @@ Please return a JSON object containing:
 - "strategy": strategy name (e.g., RSI)
 - "buy_condition": dictionary of buy conditions
 - "sell_condition": dictionary of sell conditions
-- "start_date" and "end_date": calculate actual dates based on query (e.g., "past 2 years")
+- "start_date" and "end_date": calculate actual dates based on query and take today's date={today} as reference if relative.
 - For consecutive duration conditions ("3+ days", "consecutive days"):
     - include keys: indicator, comparison, value, duration_days, duration_type
 - Include "value_type": "percent" only for percent-based profit/loss conditions; default to absolute price otherwise.
+- "remarks": "If there is any additional context or instructions from the user, include them here. Do not include ticker information here."
 
 ⚠️ Important:
 - Use default rules for known strategies if no explicit buy/sell conditions are provided.
@@ -123,7 +129,43 @@ The user has provided the following backtest query: {user_query}
             "action": "AskClarification",
             "action_input": "I couldn't interpret the query. Could you rephrase it?",
         }
+    
+    # ✅ If ticker field exists but is a strategy name, clear it
+    if structured_query_dict.get("ticker") in ["any", "Moving Average Crossover", "RSI", "MACD", "Bollinger Bands", "Mean Reversion", "Momentum", "Cross Over", "Crossover", "Death Cross", "Golden Cross"]:
+        structured_query_dict["ticker"] = []
 
+    if not structured_query_dict.get("ticker"):
+        return {
+            "thought": thoughts_text.strip(),
+            "action": "AskClarification",
+            "action_input": {
+                "question": "Could you clarify which stock/ticker you're referring to?",
+                "structured_query": structured_query_dict
+            }
+        }
+    #  Missing start_date
+    if not structured_query_dict.get("start_date"):
+        return {
+            "thought": thoughts_text.strip(),
+            "action": "AskClarification",
+            "action_input": {
+                "question": "Could you clarify the start date for this backtest?",
+                "structured_query": structured_query_dict
+            }
+        }
+
+    #  Missing end_date
+    if not structured_query_dict.get("end_date"):
+        return {
+            "thought": thoughts_text.strip(),
+            "action": "AskClarification",
+            "action_input": {
+                "question": "Could you clarify the end date for this backtest?",
+                "structured_query": structured_query_dict
+            }
+        }
+    
+    #happy path
     return {
         "thought": thoughts_text.strip(),
         "question": "Is this interpretation correct?",

@@ -1,8 +1,9 @@
-from .interpreter import interpret_query_mcp
-from .codegen import codegen_mcp
+from agents.interpreter import interpret_query_mcp
+from agents.codegen import codegen_mcp
 from tasks.executor import run_python_code
 from agents.ticker_lookup import resolve_ticker
 from tasks.market_data import get_fmp_stock_data  # Ensure this is accessible
+from agents.translator import translator_mcp
 
 class OrchestratorAgent:
     def __init__(self):
@@ -12,6 +13,14 @@ class OrchestratorAgent:
     def run(self, user_input_or_query):
         self.thoughts = []  # Reset thoughts per run
         self.log_plan("Let's understand the query and decide next steps.")
+
+        if user_input_or_query == "REJECTED":
+            return {
+                "status": "CLARIFY",
+                "question": "Okay, could you rephrase or specify corrections?",
+                "structured_query": {},
+                "thoughts": self.thoughts
+            }
 
         # Step 1: Interpret user input
         self.log_command("call:interpreter")
@@ -57,7 +66,7 @@ class OrchestratorAgent:
             "thoughts": self.thoughts
         }
 
-    def execute_confirmed_query(self, structured_query: dict):
+    def execute_confirmed_query(self, structured_query: dict, cot: str = None):
         self.thoughts = []
         self.log_plan("Executing confirmed structured query.")
 
@@ -89,11 +98,42 @@ class OrchestratorAgent:
                 "thoughts": self.thoughts
             }
 
-        # Step 3: Generate code
+        # ✅ Step 3: Translator — enrich structured query into actionable instructions
+        try:
+            self.log_command("call:translator")
+            if not cot:
+                cot = ""
+            structured_query["remarks"] = structured_query.get("remarks", "")
+            structured_query["remarks"] = (structured_query["remarks"] + " " + cot).strip()
+            trans_result = translator_mcp({"structured_query": structured_query})    
+
+            enriched_query = trans_result.get("structured_query", structured_query)
+            translator_instructions = trans_result
+            code_tasks = trans_result.get("code_tasks", [])
+
+            self.log_message("translator", f"Translator output keys: {list(trans_result.keys())}")
+
+            # Log translator reasoning
+            translator_thoughts = trans_result.get("thought", "")
+            self.log_message("translator", translator_thoughts)
+
+        except Exception as e:
+            return {
+                "status": "ERROR",
+                "error": f"Translator error: {str(e)}",
+                "thoughts": self.thoughts
+            }
+
+        # Step 4: CodeGen
         try:
             self.log_command("call:codegen")
-            code_result = codegen_mcp({"structured_query": structured_query})
-            
+            code_result = codegen_mcp({
+                "structured_query": structured_query,
+                "translated_query": enriched_query,   # ✅ use enriched translator output
+                "instructions": translator_instructions,  # ✅ forward instructions if needed
+                "code_tasks": code_tasks
+            })
+
             if code_result.get("action") != "CodeReady":
                 return {
                     "status": "ERROR",
@@ -103,7 +143,7 @@ class OrchestratorAgent:
 
             code = code_result["action_input"]
 
-            # Log the full chain of thought from codegen if available
+            # Log codegen thoughts
             codegen_thoughts = code_result.get("full_thought", code_result.get("thought", ""))
             for line in codegen_thoughts.strip().splitlines():
                 self.log_message("codegen", line.strip())
@@ -114,8 +154,8 @@ class OrchestratorAgent:
                 "error": f"Codegen error: {str(e)}",
                 "thoughts": self.thoughts
             }
-
-        # Step 4: Submit to Celery
+        
+        # Step 5: Submit to Celery
         try:
             self.log_command("call:executor")
             task = run_python_code.delay(code)

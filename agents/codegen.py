@@ -15,361 +15,324 @@ llm = ChatOpenAI(
 
 def codegen_mcp(input: dict) -> dict:
     curr_time_stamp = datetime.now().isoformat()
-    """
-    MCP-compliant code generator with foolproof alternating buy/sell signals.
-    Expects input dict with key 'structured_query' containing parsed intent dict.
-    Returns dict with keys: thought (str), action (str), action_input (str).
-    """
-    structured_query = input.get("structured_query")
-    if not structured_query:
+
+    translated = input.get("translated_query", {})
+    structured_query = input.get("structured_query", {})
+
+    print("Input to CodeGen MCP:", input)
+    if not translated and not structured_query:
         return {
-            "thought": "No structured query provided. Cannot generate code.",
+            "thought": "Neither translated_query nor structured_query provided.",
             "action": "AskClarification",
-            "action_input": "Please provide a valid structured_query JSON object."
+            "action_input": "Please provide a valid input with at least structured_query."
         }
 
-    # Extract strategy variables
-    strategy = structured_query.get("strategy_description", "")
-    buy_condition = structured_query.get("buy_condition", "")
-    sell_condition = structured_query.get("sell_condition", "")
+    # Prefer translator output
+    strategy = translated.get("strategy_plan") or structured_query.get("strategy_description", "")
+    buy_condition = translated.get("buy_condition_code") or structured_query.get("buy_condition", "")
+    sell_condition = translated.get("sell_condition_code") or structured_query.get("sell_condition", "")
     duration_type = structured_query.get("duration_type", "")
     duration_days = int(structured_query.get("duration_days", 0))
+    remarks = translated.get("remarks") or structured_query.get("remarks", "")
 
-    # Build the dynamic prompt with CoT + pseudo-code
-    prompt = f"""
-Given a trading strategy intent, first explain your reasoning step by step under ---THOUGHTS---,
-then write executable Python code under ---CODE---.
+    translator_notes = translated.get("codegen_instructions", "")
+    code_tasks = input.get("code_tasks", [])
+    
+    print("Code tasks for CodeGen:", code_tasks)
 
-Constraints:
-- Use only pandas and ta libraries (and numpy if needed).
-- Do not fetch data from the internet.
-- Use sqlite3 and pandas.read_sql() to read from market_data.db, table: stock_data.
-- Expected columns: Date, Open, High, Low, Close, Volume, Ticker.
-- Always parse Date to datetime, sort by Date ascending, and set Date as the DataFrame index.
+    CODEGEN_PROMPT = """
+You are the Code Generator agent in a multi-agent trading system.
 
+INPUT: translator_instructions JSON from the Translator agent.
 
-Strategy: {strategy}
-Buy Condition: {buy_condition}
-Sell Condition: {sell_condition}
-Duration Type: {duration_type}
-Duration Days: {duration_days}
+OUTPUT: Executable Python script that strictly implements all strategy rules. Do not include '''python''' or any markdown formatting.
+Before writing the code, explain your reasoning under ---THOUGHTS---. 
+Then output the executable code under ---CODE---. 
+Do not mix them.
 
-Important: Start your code with
-print("GPT is using bla bla bla prompt")
+---
 
-### Data & indexing (MANDATORY) ###
-1. Read the full table into a DataFrame `df`. **Fetch tickers dynamically from the database**: tickers = df['Ticker'].unique()
-2. Immediately run:
-   df['Date'] = pd.to_datetime(df['Date'])
-   df = df.sort_values('Date').set_index('Date')
-   # Ensure Date is a DatetimeIndex for all tickers and downstream calculations.
-3. When filtering per ticker always use .copy():
-   ticker_df = df[df['Ticker'] == ticker].copy()
+RULES FOR CODE GENERATION:
+1. **Data Handling**
+   - Load data from SQLite (no external APIs). Database: market_data.db Table: stock_data Columns: "Date", "Open", "High", "Low", "Close", "Volume"
+   - Convert Date to datetime, sort ascending, set as index.
+   - Fill missing values using both bfill + ffill.
+   - When calculating a rolling statistic over the past N periods, shift it by 1 period so that today’s value is only compared against the previous N periods, excluding today.
 
-### Event-Based Alternating Signals (Generic, FOOLPROOF) ###
-4. Initialize signal columns with np.nan:
-   ticker_df['Buy'] = np.nan
-   ticker_df['Sell'] = np.nan
+   # For multiple tickers:
+        - Load each ticker’s data independently from the SQLite database.
+        - Each ticker’s DataFrame should include a 'Ticker' column for identification (optional for single-ticker backtests).
+        - Perform all calculations (rolling statistics, indicators, buy/sell signals, portfolio simulation) **per ticker independently**.
+        - Do NOT combine data from multiple tickers into a single DataFrame for calculations unless simulating a combined portfolio is intended.
+        - If combining multiple tickers, use pd.concat(list_of_dataframes) instead of df.append(), and sort by ['Ticker', 'Date'] to preserve ticker separation.
+        - Apply rolling statistics, indicators, and trade logic **per ticker** to avoid cross-ticker contamination.
 
-5. Compute all indicators required by the buy/sell conditions (do not hardcode any indicator).
- - **If Buy/Sell conditions mention SMA, EMA, or MACD, compute them and plot them on the strategy chart**
- - When implementing MACD, do not call ta.trend.macd(). Instead, use the MACD class from ta.trend. Instantiate it with close, window_slow, window_fast, and window_sign, then call .macd(), .macd_signal(), and .macd_diff() to get the values.
- 
- - When using the ta library, always use the correct indicator class names:
+2. **Indicators**
+   - Use ta library for indicators (e.g., ta.momentum.RSIIndicator, ta.trend.SMAIndicator).
+   - Precompute all indicators from translator_instructions["indicators"].
+   - Ensure column names match translator_instructions["indicators"][].output_column exactly.
+   - Do not recompute indicators inside the backtest loop.
+   - If translator_instructions contains `indicators_to_plot`, ensure every item in that list is explicitly plotted in the strategy figure.
 
-        SMAIndicator for SMA
+3. ***Implement Buy/Sell logic exactly as defined in translator_instructions:***
+   - Only execute Buy if position == 0.
+   - Only execute Sell if position == 1.
+   - Always **check `position` before executing sell**, so sells do not occur without a prior buy.
+   - Respect stop-loss and take-profit only if explicitly provided.
+   - Track trades as (action, date, price) in a list.
+   - **Always use the trades list for determining entry price and for any sell conditions — do not compute sell signals from the DataFrame alone.**
+   - Do not truncate the last buy trade.
+        1. If the strategy ends with an open position (i.e., last trade is a buy), then automatically close it on the final available closing price in the dataset.
+        2. Record this as a sell trade at the last date.
+        3. Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
+        4. If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
+   - For crossovers (golden/death cross, RSI thresholds, etc.):
+     - Use explicit detection: `cond = (A > B) & (A.shift(1) <= B.shift(1))` for cross above.
+     - Similarly, `cond = (A < B) & (A.shift(1) >= B.shift(1))` for cross below.
+   - Respect stop_loss / take_profit:
+     - Use `entry_price` per trade.
+     - stop_loss: `current_price <= entry_price * (1 - stop_loss_pct/100)`.
+     - take_profit: `current_price >= entry_price * (1 + take_profit_pct/100)`.
+   - **Calculate all indicator series (RSI, SMA, etc.) before the loop**, do not recalc per iteration.
 
-        EMAIndicator for EMA
+4. **Position & Trade Tracking**
+   - Track `position` (0 = no position, 1 = holding position), `entry_price`, `cash`, `shares`.
+        - Only execute Buy if position == 0.
+        - Only execute Sell if position == 1.
+        - Append trades with (action, date, price).
+        - Ensure every Buy has a later matching Sell (align trades before plotting).
+   - Append trades with (`action`, `date`, `price`).
+   - No Sell without an active Buy.
+   - Ensure every Buy has a later matching Sell (align trades before plotting).
+   - Do not truncate the last buy trade.
+        1. If the strategy ends with an open position (i.e., last trade is a buy), then automatically close it on the final available closing price in the dataset.
+        2. Record this as a sell trade at the last date.
+        3. Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
+        4. If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
+   - When calculating daily portfolio value, always update `portfolio_value = cash + shares * current_price` **after executing Buy/Sell logic** for that day, not before.
 
-        RSIIndicator for RSI
+5. **Portfolio Simulation**
+   - Start with initial_capital = 100000 (or 10,000 if specified in translator_instructions).
+   - **Update portfolio_series after executing trades** each day.
+   - Store as `portfolio_series` aligned with df index.
+   - Ensure initial capital line spans full index length when plotting.
+   - After evaluating buy/sell logic **for each day**, immediately calculate and record portfolio value as `cash + shares * close_price`.
+   - Store this daily portfolio value in `portfolio_series` aligned with df index.
+   - Align portfolio_series with df index.
+   - Only plot portfolio_series in portfolio_fig; do not include other price/indicator traces.
+   - Aggregated Buy/Sell markers should appear only in strategy_fig.
 
-        MACD for MACD
+6. **Performance Metrics**
+   - Cumulative Return = (Vend/Vstart - 1) * 100
+   - Annualized Return = ((Vend/Vstart) ** (252 / total_days) - 1) * 100. Use total_days = len(df).
+   - Volatility = std(daily_returns) * sqrt(252) * 100
+   - Max Drawdown = max(1 - portfolio / cummax(portfolio)) * 100
+   - Guard against empty DataFrame or zero trades.
+   - Save results in form of table with columns Ticker, Cumulative Return, Annualized Return, Volatility and Max Drawdown and one row for each ticker. Save table to trading_results.html.
 
-        BollingerBands for Bollinger Bands
-
-        StochasticOscillator for Stochastic
-
-    - Never import RSI or call functions like macd() — they do not exist. Always instantiate the class and then call the appropriate method (.sma_indicator(), .ema_indicator(), .rsi(), .macd(), etc.).
- 
-    - ###Stop-loss / Take-profit instructions for the agent(If operator contains stop_loss or take_profit)###
-
-        Reference price
-
-        When a BUY signal executes, set entry_price = current_price.
-
-        For SELL conditions with "indicator": "Price" and "value_type": "percent", calculate thresholds relative to entry_price.
-
-        Do NOT use previous day’s close or pct_change() for stop-loss / take-profit calculations.
-
-        Operator mapping
-
-        "operator": "stop_loss" → trigger if current_price <= entry_price * (1 - value/100)
-
-        "operator": "take_profit" → trigger if current_price >= entry_price * (1 + value/100)
-
-        Evaluate only when currently holding a position (in_position = True).
-
-        Combining sell conditions
-
-        Combine percent-based stop-loss / take-profit with other sell conditions (e.g., RSI > 70, MACD < Signal) using logical OR.
-
-        Sell if any of these conditions is True.
-
-        Updating entry price
-
-        After executing a SELL (stop-loss, take-profit, or strategy-based condition), reset entry_price = None.
-
-        The next BUY sets a new entry_price.
-
-        Per-trade thresholds
-
-        Percent thresholds are applied per trade, not globally to the whole series.
-
-        Each trade’s stop-loss / take-profit is independent and based only on its entry_price.
-
-        Example pseudo-code for clarity: (This is only example logic, do NOT copy-paste)
-
-        if not in_position and BUY_condition:
-            buy at current_price
-            entry_price = current_price
-            in_position = True
-
-        if in_position:
-            SELL_condition_stop_loss = current_price <= entry_price * (1 - stop_loss_percent/100)
-            SELL_condition_take_profit = current_price >= entry_price * (1 + take_profit_percent/100)
-            SELL_condition_combined = SELL_condition_RSI | SELL_condition_stop_loss | SELL_condition_take_profit
-            if SELL_condition_combined:
-                sell at current_price
-                entry_price = None
-                in_position = False
-
-        - Evaluate SELL_condition_combined only when in_position = True.
-            - Reset entry_price = None after executing a SELL.
-            - Percent thresholds are per trade, relative to entry_price, not the entire series.
-
-    -   - If the strategy has default sell rules (e.g., RSI > 70, MACD < Signal), and the user provides stop-loss or take-profit, **merge them using logical OR**.
-            - Do NOT overwrite the default strategy sell condition when user adds percent-based thresholds.
-            - For example:
-                default_sell_condition = (RSI > 70)
-                user_stop_loss_condition = current_price <= entry_price * (stop_loss_percent/100)
-                user_take_profit_condition = current_price >= entry_price * (take_profit_percent/100)
-                SELL_condition_combined = default_sell_condition | user_stop_loss_condition | user_take_profit_condition        
+       ****VERY IMPORTANT*****
+            1. Always update portfolio value **after executing buy/sell** for that day.
+            2. Use pandas Series for portfolio values for easier pct_change(), cummax(), and indexing.
+            3. Compute daily returns as `portfolio_series.pct_change().dropna()`.
+            4. Volatility = daily_returns.std() * sqrt(252) * 100.
+            5. Max drawdown = (1 - portfolio_series / portfolio_series.cummax()).max() * 100.
+            6. Annualized return = ((final_portfolio_value / initial_capital) ** (252 / n_days) - 1) * 100, where n_days = len(df).
+            7. Do not truncate the last buy trade.
+                - If the strategy ends with an open position (i.e., last trade is a buy), then automatically close it on the final available closing price in the dataset.
+                - Record this as a sell trade at the last date.
+                - Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
+                - If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
+            8. All calculations (MA, RSI, returns) should be **per ticker**, even for multi-ticker backtests.
+            9. If no trades are executed during the backtest, set all performance metrics (cumulative return, annualized return, volatility, max drawdown) to 0 and print "No trades executed in this period.".
+                - Only calculate metrics using the portfolio_series when trades exist.
+                - Plotting should also skip buy/sell markers gracefully if no trades were executed.
         
-        Important notes for code generation
+######Approach#######:
+        Load data per ticker separately
 
-        Never calculate stop-loss / take-profit using pct_change() or daily differences.
+        Query historical OHLCV data from SQLite for each ticker.
 
-        Always base percentage thresholds on the entry price of the current trade.
+        Convert the Date column to datetime, set as index, sort, and fill missing values.
 
-        Logical OR combination ensures position exits when any sell condition triggers.
+        Calculate indicators per ticker
 
-        Reset entry_price after position closure.
+        Compute moving averages, RSI, or other indicators on a per-ticker basis.
 
-        - When combining default strategy rules with user-provided stop-loss/take-profit, **always use logical OR**, even if the original sell_condition logic is "and".
-        - For multiple indicators in sell_condition (e.g., RSI > 70 AND MACD < Signal), keep their original AND/OR logic inside, then OR the percent-based thresholds.
+        Use .rolling() and .shift() as needed.
 
- 6. Detect crossings (False → True) only. Example helper logic:
-   BUY_curr = <evaluate buy_condition boolean on current row>
-   BUY_prev = BUY_curr.shift(1)  # or compute prev boolean with .iloc[idx-1]
-   BUY_crossed(idx) = (not BUY_prev) and BUY_curr
-   Same for SELL_crossed.
+        Backtest logic per ticker
 
-  
-7. Apply strict alternation using `in_position` and **use .loc for assignments**:
-   in_position = False
-   for idx in range(1, len(ticker_df)):
-       if not in_position and BUY_crossed(idx):
-           ticker_df.loc[ticker_df.index[idx], 'Buy'] = ticker_df.loc[ticker_df.index[idx], 'Close']
-           in_position = True
-       if in_position and SELL_crossed(idx):
-           ticker_df.loc[ticker_df.index[idx], 'Sell'] = ticker_df.loc[ticker_df.index[idx], 'Close']
-           in_position = False
-   - Do NOT use chained assignments like `ticker_df['Buy'].iloc[...] = ...`.
-   - Only mark the exact crossing bar; do NOT repeat buy/sell markers on consecutive bars.
-   - Always cast BUY_condition and SELL_condition to boolean before crossing detection:
-        BUY_condition = (<expression>).astype(bool)
-        SELL_condition = (<expression>).astype(bool)
-    - Use .shift(1).fillna(False) for previous condition checks.
+        Initialize variables: position, cash, shares, portfolio_series, trades.
 
-### Match trades & remove unmatched last buy ###
-8.Always ensure Buy and Sell signals are paired correctly:
-   - After detecting raw Buy/Sell signals, drop extra unmatched signals.
-   - Keep only the first N buys and first N sells, where N = min(len(Buy), len(Sell)).
-   - Reset ticker_df['Buy'] and ticker_df['Sell'] to NaN, then reassign only the matched Buy/Sell indexes.
-   - This ensures no stray unmatched signals remain in the DataFrame.
+        Loop over the rows of the ticker’s DataFrame:
 
-After marking raw crossing events:
-   trades = ticker_df[['Buy','Sell']].dropna(how='all')
-   buy_prices = trades['Buy'].dropna()
-   sell_prices = trades['Sell'].dropna()
-   # Ensure only matched pairs are used:
-   min_len = min(len(buy_prices), len(sell_prices))
-   buy_prices = buy_prices.iloc[:min_len]
-   sell_prices = sell_prices.iloc[:min_len]
-   # Replace unmatched entries in ticker_df so only completed pairs remain:
-   matched_buy_idx = buy_prices.index
-   matched_sell_idx = sell_prices.index
-   # Clear non-matched buy/sell markers using .loc (no chained assignment):
-   ticker_df.loc[~ticker_df.index.isin(matched_buy_idx), 'Buy'] = np.nan
-   ticker_df.loc[~ticker_df.index.isin(matched_sell_idx), 'Sell'] = np.nan
+        Buy condition: Check strategy-specific rules, execute buy if not already holding.
 
-### Build Position column from cleaned signals ###
-9. Build position strictly from matched Buy/Sell:
-   ticker_df['Position'] = 0
-   ticker_df.loc[ticker_df['Buy'].notna(), 'Position'] = 1
-   ticker_df.loc[ticker_df['Sell'].notna(), 'Position'] = 0
-   ticker_df['Position'] = ticker_df['Position'].ffill().astype(int)
+        Sell condition: Check exit rules, execute sell if holding.
 
-### Portfolio calculation — ALL-IN / ALL-OUT (cash + integer shares) ###
-10. Use all-in / all-out so SELL updates cash and portfolio value:
-    initial_capital = 100000.0
-    cash = initial_capital
-    shares = 0
-    portfolio_values = []
-    # iterate over the Date index (DatetimeIndex)
-    for d in ticker_df.index:
-        price = float(ticker_df.loc[d, 'Close'])
-        if d in buy_prices.index:
-            shares = int(cash // price)
-            cash -= shares * price
-        if d in sell_prices.index:
-            cash += shares * price
-            shares = 0
-        portfolio_value = cash + shares * price
-        portfolio_values.append(portfolio_value)
-    portfolio_series = pd.Series(portfolio_values, index=ticker_df.index).astype(float)
-    # If portfolio_series is empty, set metrics to zeros and print "No trades executed for {{ticker}}"
+        - Store executed price in `trades` at the time of Buy/Sell.
+        - For stop-loss or sell checks, use the stored price from the trades list (e.g., trades[-1][2]) instead of re-fetching it from the DataFrame.
+        - Do not use df.iloc with a timestamp (like trades[-1][1]) because it causes type errors.
 
-### Metrics computed from portfolio_series (as percentages) ###
-11. Compute metrics safely (DatetimeIndex required). Use fallbacks:
-    if len(portfolio_series) == 0:
-        cumulative_return_pct = annualized_return_pct = volatility_pct = max_drawdown_pct = 0.0
-    else:
-        cumulative_curve = portfolio_series / float(portfolio_series.iloc[0])
-        # total_days must be based on datetime index
-        total_days = (portfolio_series.index[-1] - portfolio_series.index[0]).days
-        total_days = total_days if total_days > 0 else len(portfolio_series)
-        cumulative_return_pct = (cumulative_curve.iloc[-1] - 1.0) * 100
-        annualized_return_pct = ((cumulative_curve.iloc[-1]) ** (365.0 / total_days) - 1.0) * 100 if total_days > 0 else 0.0
-        volatility_pct = cumulative_curve.pct_change().dropna().std() * (252 ** 0.5) * 100
-        max_drawdown_pct = (1.0 - (cumulative_curve / cumulative_curve.cummax())).max() * 100
-    # Round to 2 decimals before saving: e.g. round(value, 2)
+        Portfolio update: After buy/sell logic, update portfolio_value = cash + shares * current_price and store in portfolio_series.
+        - **Important:** Do not update portfolio before the buy/sell logic — always update after executing trades for the day.
 
-### Plotting (explicit axes) (Use Plotly) ###
+        Handle unmatched trades: - Do not truncate the last buy trade.
+        1. If the strategy ends with an open position (i.e., last trade is a buy), then automatically close it on the final available closing price in the dataset.
+        2. Record this as a sell trade at the last date.
+        3. Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
+        4. If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
 
-12. Plot 1 — Strategy chart:
-    - X-axis = Date (use ticker_df.index)
-    - Y-axis = Close Price (blue line)
-    - Plot completed Buy markers (green) and Sell markers (red) at the Close price of matched trades only.
-    - Also plot SMA/EMA/MACD/RSI if used in buy/sell conditions.
-    - Save to HTML file using fig.write_html(file_strategy).
+        Calculate performance metrics per ticker.
 
-13. Plot 2 — Portfolio chart:
-    - X-axis = Date
-    - Y-axis = portfolio_series values (purple line)
-    - Save to HTML file using fig.write_html(file_portfolio).
+        Cumulative Return = (final_portfolio_value / initial_capital - 1) * 100
 
-### Output files & formatting ###
-14. Save per-ticker files with a timestamp: {{ticker}}_strategy_plot_{curr_time_stamp}.html and {{ticker}}_portfolio_value_{curr_time_stamp}.html. Ensure files are written with fig.write_html().
-15. Append filenames to an `output_files` list and print them at the end (so orchestrator/celery can capture them).
-    **Include summary file trading_results.html in output with its filename so UI can display it**
+        Annualized Return = ((final_portfolio_value / initial_capital) ** (252 / total_days) - 1) * 100
 
-16. Build per-ticker metrics dict with keys:
-    'Ticker', 'Cumulative Return (%)', 'Annualized Return (%)', 'Volatility (%)', 'Max Drawdown (%)'
-    - All numeric metric values should be percentages rounded to two decimals before constructing the DataFrame.
-17. Save the summary DataFrame to `trading_results.html` and print the filename.
+        Daily returns = portfolio_series.pct_change().dropna()
 
-18. Before the per-ticker loop:
-- Create a single, filesystem-safe timestamp once and reuse it for all filenames:
-    curr_time_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-- Initialize an empty list to collect per-ticker metrics:
-    metrics_list = []
-- Initialize output_files = []
+        Volatility = daily_returns.std() * sqrt(252) * 100
 
-Inside the per-ticker loop, after computing and rounding the metrics:
-- Build metrics_dict for the current ticker and append it to metrics_list:
-    metrics_dict = {{ 'Ticker': ticker, 'Cumulative Return (%)': cumulative_return_pct, ... }}
-    metrics_list.append(metrics_dict)
+        Max Drawdown = (1 - portfolio_series / portfolio_series.cummax()).max() * 100
 
-- Create filename variables (use the same curr_time_stamp) and write files with those variables:
-    file_strategy = f"{{ticker}}_strategy_plot_{{curr_time_stamp}}.html"
-    strategy_fig.write_html(file_strategy)
-    output_files.append(file_strategy)
+        Store results efficiently
 
-    file_portfolio = f"{{ticker}}_portfolio_value_{{curr_time_stamp}}.html"
-    portfolio_fig.write_html(file_portfolio)
-    output_files.append(file_portfolio)
+        Instead of using the deprecated DataFrame.append(), either:
 
-- Do NOT call pd.Timestamp.now() (or datetime.now()) again when building filenames — always reuse curr_time_stamp so names are consistent and not accidentally different per append.
+        Use pd.concat([existing_df, new_df], ignore_index=True) after creating a small DataFrame with the new row, or
 
-19. After the per-ticker loop:
-- Build the summary DataFrame from metrics_list (not a single metrics_dict):
-    summary_df = pd.DataFrame(metrics_list)
-- Save the summary to the fixed filename the UI expects and append that filename:
-    summary_df.to_html('trading_results.html', index=False)
-    output_files.append('trading_results.html')
-- Print the trading_results.html filename (so Gradio/orchestrator can pick it up) and print the output_files list.
-- When saving tables or summaries (e.g., trading results), do not use only DataFrame.to_html().
-    Always wrap the table output into a complete standalone HTML page with <html>, <head>, <body>, and basic CSS styling.
-    This ensures it displays correctly inside an iframe in Gradio.
+        Append dictionaries to a list and convert the list to a DataFrame after the loop (preferred for speed and clarity).
 
-Important Notes for Agent:
-- Never use chained assignment; always use df.loc[...] = ... for column updates.
-- Ensure Date is converted to datetime and set as the index before any time-based math.
-- Use .copy() when slicing per ticker to avoid SettingWithCopyWarning.
-- Remove any unmatched buy (no sell) before computing Position and portfolio.
-- Compute metrics from `portfolio_series` (pandas Series) and return values in percentages (two decimals).
-- When generating pandas code, strictly follow these rules to avoid FutureWarnings:
+        Plotting per ticker
 
-    1. Do NOT use `.fillna(False)` or `.fillna(True)` directly on boolean/object Series.  
-    Instead, first ensure the dtype is correct:  
-        BUY_prev = BUY_condition.shift(1).fillna(False).astype(bool)  
-    Or, equivalently:  
-        BUY_prev = BUY_condition.shift(1).fillna(False).infer_objects(copy=False)
+        Create two plots per ticker:
 
-    2. Do NOT index Series directly with `series[idx]` where idx is an integer.  
-    Use `.iloc[idx]` for positional access and `.loc[label]` for label-based access.  
-    Example:  
-        if not in_position and BUY_crossed.iloc[idx]:  
-            ...
+        Strategy plot with price, indicators, buy/sell markers.
 
-    3. If you must fill NA values on object/bool dtype, always cast afterwards:  
-        SELL_prev = SELL_condition.shift(1).fillna(False).astype(bool)
+        Portfolio value plot with initial capital line.
 
-    4. If you want to future-proof silently, set once at the top of the script:  
-        import pandas as pd  
-        pd.set_option("future.no_silent_downcasting", True)
+        Save results
 
-    5. Suppress all other warnings.
-    6.  Whenever creating shifted BUY/SELL signals:
-    - Use .shift(1).infer_objects(copy=False).fillna(False).astype(bool)
-    - Also set at the top of the script:
-        import pandas as pd
-        pd.set_option("future.no_silent_downcasting", True)
-    - This avoids FutureWarnings about downcasting.
+        Save per-ticker HTML plots and the final results table (results.to_html()).
 
-- Your output MUST have exactly two sections:
+7. **Plots** (Use plotly, save as HTML)
+    "IMPORTANT: Your trades list already contains executed buys/sells (tuples (action,date,price)). Use that list to plot markers and to derive entry_price for stop-loss/take-profit logic — do NOT recompute or infer trades from indicator boolean masks."
 
----THOUGHTS--- (required, step-by-step reasoning)
-1) Restate the parsed intent from the structured_query in one clear sentence.
-2) Identify every indicator needed to evaluate the provided Buy/Sell conditions.
-   - List each indicator exactly (variable name + parameters). Example: SMA_20, EMA_50, RSI_14, MACD_fast12_slow26_signal9.
-   - If the user did not specify indicator parameters (e.g., SMA length), choose sensible defaults (SMA:20,50; EMA:12,26,50; RSI:14; MACD: fast=12, slow=26, signal=9) and state them here.
-3) Produce a short numbered plan mapping to code sections (data load, per-ticker loop, indicator computation, signal crossing detection, alternation enforcement, matching trades, portfolio sim, metrics, plotting, file output).
-4) State assumptions and edge-cases you will handle (e.g., insufficient bars to compute an indicator, identical buy & sell at same bar, no trades executed).
-5) List what will be plotted for the strategy chart and portfolio chart (including RSI/SMA/EMA/MACD if used).
-6) End with a single-line confirmation: "Ready to produce code."
+   - Strategy Plot: - Include price, all indicators in `indicators_to_plot`, and buy/sell markers.
+   - Buy/Sell markers on strategy plot must reflect the **trades list**, NOT the raw indicator conditions.
+   - Do not use DataFrame boolean masks (like `RSI<30`) for plotting; only use dates/prices from executed Buy/Sell tuples (i.e. from the trades list).
+   - Do not truncate the last buy trade.
+        1. If the strategy ends with an open position (i.e., last trade is a buy), then automatically close it on the final available closing price in the dataset.
+        2. Record this as a sell trade at the last date.
+        3. Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
+        4. If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
 
----CODE---
-(executable Python code only, no comments, no markdown, no code fences)
+   - Plot a single Scatter trace for all Buys and another for all Sells to avoid multiple legend entries.
+   - Portfolio Plot: daily portfolio value (initial investment baseline if specified).
+   *PLOT RULES — REQUIRED IMPLEMENTATION DETAILS (copy/paste safe)*
+    - Use plotly.subplots.make_subplots with secondary_y=True for strategy plots:
+        from plotly.subplots import make_subplots
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+    - ALWAYS add price/moving-average traces using: fig.add_trace(<trace>, secondary_y=False)
+    - ALWAYS add oscillator traces (RSI, MACD, etc.) using: fig.add_trace(<trace>, secondary_y=True)
+    - Do NOT plot oscillators on the primary axis (do not use boolean df masks like df[df['RSI']<30] for marker plotting).
+    - **Use the trades list for Buy/Sell markers only**. Do not compute markers from indicator conditions. Example for markers:
+        buy_dates = [t[1] for t in trades if t[0] == "Buy"]
+        buy_prices = [t[2] for t in trades if t[0] == "Buy"]
+        fig.add_trace(go.Scatter(x=buy_dates, y=buy_prices, mode='markers', name='Buy', marker=dict(color='green', size=8)), secondary_y=False)
+    - After adding traces call:
+        fig.update_layout(yaxis=dict(title="Price"), yaxis2=dict(title="Oscillators", overlaying="y", side="right"))
+    - Create TWO separate figures: strategy_fig (make_subplots secondary_y=True) and portfolio_fig (single axis). Save each to its own HTML file.
+    - **If translator_instructions includes `"axis":"secondary"` for an indicator, respect that mapping.**
+   - Save as HTML files with timestamp in filename.
+
+   - **Create two distinct Figure objects**:
+    1. Strategy Figure (`strategy_fig`) for Price, indicators, and Buy/Sell markers.
+    2. Portfolio Figure (`portfolio_fig`) for daily portfolio value (and optional initial capital line).
+    - When plotting initial capital in portfolio_fig, use:
+            x = portfolio_series.index
+            y = [initial_capital] * len(portfolio_series)
+            mode = 'lines'
+            line = dict(dash='dash')
+            name = 'Initial Capital'
+
+    - Do **not** combine strategy and portfolio lines into a single figure.
+    - Save each figure to its own HTML file with timestamped filename.
+
+8. **Output Files**
+   - {{ticker}}_strategy_plot_{{timestamp}}.html
+   - {{ticker}}_portfolio_value_{{timestamp}}.html
+   - trading_results.html
+   - **MUST**: The generated Python code must collect the exact filenames it creates (plots and results) into a list variable named `generated_files`. After saving files, the code must:
+       1. Write `generated_files` to a JSON file named `generated_files_{curr_time_stamp}.json` in the working directory.
+       2. Print the JSON-serialized `generated_files` list to stdout (so the executor/orchestrator can capture it).
+       3. Ensure the filenames match the naming conventions above and any `required_files` provided by the translator instructions; if translator provides `required_files`, use those exact filenames (substituting {ticker} and {curr_time_stamp} accordingly) and add them to `generated_files`.
+       4. If the code creates additional supporting files (logs, CSVs), add them to `generated_files` as well.
+
+9. **Safety Checks**
+   - Ensure Buy/Sell alignment.
+   - Verify Buy/Sell alignment: no consecutive Buys or consecutive Sells.
+   - Ensure portfolio_series updates correctly according to position state.
+   - Verify portfolio_series length matches df.index and reflects trade updates.
+   - Verify buy/sell marker traces appear only once in legend each.
+   - Ensure portfolio_series length matches df length.
+   - When generating backtest loops, ensure that portfolio tracking produces a series aligned exactly with the dataframe index (no off-by-one). If you start iteration from i=1, align portfolio_series with df.index[1:]. If you start from i=0, make sure to guard lookbacks with i > 0.
+   - Ensure metrics don’t crash on empty datasets.
+   - Avoid deprecated methods like DataFrame.append(); use pd.concat() or build a list of dicts.
+   - Perform all calculations per ticker; treat a single ticker as a special case.
+   - Update portfolio after buy/sell execution.
+
+10. **Code Style**
+   - Must be executable as-is (imports included).
+   - No explanations, just code.
+   - Clear, modular structure with comments.
+
+---SPECIAL REQUIREMENTS FOR CROSSOVERS & RE-ENTRY---
+- For every translator `buy_spec` or `sell_spec` condition with `operator` == "crosses_above" or "crosses_below", implement the exact pandas shift-based condition using .shift(1). Example code hint you MUST include in code_tasks:
+    - `buy_cond = (df['RSI'] > 30) & (df['RSI'].shift(1) <= 30)`
+    - `sma_cross = (df['SMA_50'] > df['SMA_200']) & (df['SMA_50'].shift(1) <= df['SMA_200'].shift(1))`
+- For re-entry rules included under `trade_management.reentry_rule`:
+    - Implement a boolean `can_reenter` (or `waiting_for_reset`) state.
+    - After any Sell, set `can_reenter = False`.
+    - Only reset `can_reenter` according to the reentry_rule (examples: wait until RSI < 30 and then new crossover above 30; or wait until indicator leaves overbought zone).
+    - Prevent new Buys while `can_reenter == False` even if buy condition is True.
+    - Document the state reset condition in the code as comments and implement it exactly (e.g., `if current_rsi < 30: can_reenter = True` or a more specific rule if translator provided one).
+
+---OUTPUT FORMAT REQUIRED FROM LLM---
+- Produce **only** two sections:
+    1. `---THOUGHTS---` (plain text reasoning).
+    2. `---CODE---` (pure Python code implementing everything).
+- Do not return any other text, framing, or markdown.
+- The code under `---CODE---` **must** create and save files named above, collect them into `generated_files`, write `generated_files_{curr_time_stamp}.json`, and print the JSON representation of `generated_files` to stdout before exiting.
+
+---ADDITIONAL NOTES---
+- If translator_instructions contains `required_files`, the generated code must honor those exact filenames (substituting {ticker}, {curr_time_stamp}) and include them in `generated_files`.
+- If translator_instructions includes `indicators_to_plot`, ensure they are plotted and included in strategy_fig.
+- If no trades executed, code should still create `trading_results.html` containing a one-row table where metrics are zero and include a note "No trades executed in this period." and include that filename in `generated_files`.
+- Use initial_capital value from translator_instructions if provided; otherwise default to 10000.
+
+---END PROMPT---
 """
-
 
     try:
         messages = [
-            SystemMessage(content="You're a trading algorithm assistant. Reason step by step, then write working code. No markdown or code fences."),
-            HumanMessage(content=prompt)
-        ]
+    SystemMessage(content="You are the Code Generator agent in a multi-agent trading system. You must strictly follow the provided translator_instructions."),
+    HumanMessage(content=f"""
+        TRANSLATOR_INSTRUCTIONS (JSON):
+        {translated}
+
+        CODE_TASKS (ordered steps):
+        {code_tasks}
+
+        ---
+
+        FOLLOW THESE INSTRUCTIONS AND RULES:
+        {prompt}
+
+        IMPORTANT: First explain your reasoning under ---THOUGHTS---. 
+        Then write the executable Python code under ---CODE---.
+        """)
+    ]
 
         response = llm.invoke(messages)
         raw = response.content

@@ -40,6 +40,7 @@ os.makedirs(PLOTS_DIR, exist_ok=True)
 class QueryRequest(BaseModel):
     query: str
     structured_query: Optional[Dict[str, Any]] = None
+    cot: Optional[str] = None
 
 # -----------------------------
 # Initialize orchestrator
@@ -75,25 +76,31 @@ async def interpret_query_endpoint(req: QueryRequest):
 @fastapi_app.post("/api/submit-query")
 async def submit_query(req: QueryRequest):
     """
-    Handles both:
+    Handles:
     1. Normal query interpretation (user_query only)
     2. Confirmed structured query (skip interpreter)
+    3. Rejected interpretation (stop execution and ask for rephrase)
     """
     try:
+        # Handle rejection first
+        if req.query == "REJECTED":
+            result = orchestrator_agent.run("REJECTED")
+            return result
+
+        # Confirmed structured query
         if req.structured_query:
-            # ✅ Let orchestrator handle codegen + execution + CoT logging
-            result = orchestrator_agent.execute_confirmed_query(req.structured_query)
+            result = orchestrator_agent.execute_confirmed_query(req.structured_query, cot=req.cot)
             print("DEBUG result from code generation:", result)
             return result
 
-        # Normal flow: use orchestrator agent
+        # Normal query flow
         result = orchestrator_agent.run(req.query)
         return result
 
     except Exception as e:
         logging.exception("Error in submit-query")
         return {"status": "ERROR", "error": str(e)}
-
+    
 # Task status endpoint (unchanged)
 @fastapi_app.get("/api/task-status/{task_id}")
 async def task_status(task_id: str):

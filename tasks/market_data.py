@@ -25,8 +25,8 @@ def fetch_fmp_single_ticker(tkr: str, ticker_try: str, start_date: str, end_date
     params = {"from": start_date, "to": end_date, "apikey": FMP_API_KEY}
 
     resp = requests.get(url, params=params, timeout=15)
-    print(f"Fetching {ticker_try} from {url} with params {params}")
-    print("response:", resp)
+    #print(f"Fetching {ticker_try} from {url} with params {params}")
+    
     if resp.status_code != 200:
         # return empty DataFrame (caller will try other suffixes)
         print(f"HTTP Error {resp.status_code} for {ticker_try}")
