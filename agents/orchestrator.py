@@ -4,11 +4,27 @@ from tasks.executor import run_python_code
 from agents.ticker_lookup import resolve_ticker
 from tasks.market_data import get_fmp_stock_data  # Ensure this is accessible
 from agents.translator import translator_mcp
+import re
 
 class OrchestratorAgent:
     def __init__(self):
         self.thoughts = []
         self.logs = []
+    
+
+    def clean_cot_text(cot_text: str) -> str:
+        """
+        Remove '[ROLE - TYPE]' prefixes and return only the raw text lines.
+        """
+        lines = cot_text.splitlines()
+        cleaned = []
+        for line in lines:
+            # Remove things like: [INTERPRETER - PLAN] Some text
+            cleaned_line = re.sub(r"^\[.*?\]\s*", "", line).strip()
+            if cleaned_line:
+                cleaned.append(cleaned_line)
+        return "\n".join(cleaned)
+
 
     def run(self, user_input_or_query):
         self.thoughts = []  # Reset thoughts per run
@@ -66,9 +82,28 @@ class OrchestratorAgent:
             "thoughts": self.thoughts
         }
 
-    def execute_confirmed_query(self, structured_query: dict, cot: str = None):
+    def execute_confirmed_query(self, structured_query: dict, cot: str = None, original_cot: str = None, original_query: str = None):
         self.thoughts = []
         self.log_plan("Executing confirmed structured query.")
+
+        #added extra step to check if CoT of interpreter is changed by user:
+        self.thoughts = []
+        self.log_plan("Executing confirmed structured query.")
+
+        # ✅ Check if user edited CoT
+        if cot and original_cot and cot.strip() != original_cot.strip():
+            self.log_message("orchestrator", "User edited Chain of Thoughts. Re-interpreting query.")
+            cleaned_cot = self.clean_cot_text(cot)
+
+            # 🔁 Call interpreter again with original query + edited cot
+            result = interpret_query_mcp({
+                "query": original_query,
+                "cot": cleaned_cot
+            })
+
+            structured_query = result.get("action_input", structured_query)
+            thoughts = result.get("thought") or result.get("thoughts", "")
+            self.log_message("interpreter", thoughts)
 
         # Step 1: Resolve tickers
         try:
@@ -103,6 +138,9 @@ class OrchestratorAgent:
             self.log_command("call:translator")
             if not cot:
                 cot = ""
+
+            #temporary fix to make cot = "" for translator. we do not need to send cot to translator as of now.
+            cot = ""            
             structured_query["remarks"] = structured_query.get("remarks", "")
             structured_query["remarks"] = (structured_query["remarks"] + " " + cot).strip()
             trans_result = translator_mcp({"structured_query": structured_query})    

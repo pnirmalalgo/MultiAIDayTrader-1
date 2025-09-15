@@ -7,7 +7,7 @@ import pandas as pd
 import requests
 import urllib.parse
 from dotenv import load_dotenv
-from typing import TypedDict, Union, Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 import re
 import ast
 import logging
@@ -41,6 +41,8 @@ class QueryRequest(BaseModel):
     query: str
     structured_query: Optional[Dict[str, Any]] = None
     cot: Optional[str] = None
+    original_cot: Optional[str] = None
+    original_query: Optional[str] = None
 
 # -----------------------------
 # Initialize orchestrator
@@ -78,7 +80,7 @@ async def submit_query(req: QueryRequest):
     """
     Handles:
     1. Normal query interpretation (user_query only)
-    2. Confirmed structured query (skip interpreter)
+    2. Confirmed structured query (skip interpreter or re-run if CoT changed)
     3. Rejected interpretation (stop execution and ask for rephrase)
     """
     try:
@@ -89,7 +91,12 @@ async def submit_query(req: QueryRequest):
 
         # Confirmed structured query
         if req.structured_query:
-            result = orchestrator_agent.execute_confirmed_query(req.structured_query, cot=req.cot)
+            result = orchestrator_agent.execute_confirmed_query(
+                structured_query=req.structured_query,
+                cot=req.cot,
+                original_cot=req.original_cot,
+                original_query=req.original_query,
+            )
             print("DEBUG result from code generation:", result)
             return result
 

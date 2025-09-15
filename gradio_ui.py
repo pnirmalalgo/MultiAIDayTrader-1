@@ -39,7 +39,9 @@ def submit_query_to_orchestrator(user_input):
                 gr.update(visible=False),   # flag_btn
                 gr.update(visible=False),   # submit_btn
                 gr.update(visible=True),    # cot_output
-                gr.update(visible=True)     # structured_query_output
+                gr.update(visible=True),    # structured_query_output
+                user_input,                 # NEW → original_query
+                cot_text                    # NEW → original_cot
             )
 
         elif status == "PENDING":
@@ -54,7 +56,9 @@ def submit_query_to_orchestrator(user_input):
                 gr.update(visible=False),   # flag_btn
                 gr.update(visible=False),   # submit_btn
                 gr.update(visible=True),    # cot_output
-                gr.update(visible=True)     # structured_query_output
+                gr.update(visible=True),    # structured_query_output
+                user_input,                 # NEW → original_query
+                cot_text                    # NEW → original_cot
             )
 
         else:
@@ -67,7 +71,9 @@ def submit_query_to_orchestrator(user_input):
                 gr.update(visible=False),
                 gr.update(visible=False),
                 gr.update(visible=True),
-                gr.update(visible=True)
+                gr.update(visible=True),
+                user_input,                 # NEW
+                cot_text                    # NEW
             )
 
     except Exception as e:
@@ -80,7 +86,9 @@ def submit_query_to_orchestrator(user_input):
             gr.update(visible=False),
             gr.update(visible=False),
             gr.update(visible=True),
-            gr.update(visible=True)
+            gr.update(visible=True),
+            user_input,                     # NEW (still pass query for debugging)
+            ""                              # NEW (empty original_cot if fail)
         )
 
 # -----------------------------------------
@@ -111,7 +119,7 @@ def on_user_rejects_interpretation(structured_query_str):
 # -----------------------------------------
 # When user confirms interpretation
 # -----------------------------------------
-def on_user_confirms_interpretation(structured_query_str, cot_text):
+def on_user_confirms_interpretation(structured_query_str, cot_text, original_query, original_cot):
     try:
         structured_query = json.loads(structured_query_str) if structured_query_str else {}
     except Exception as e:
@@ -120,7 +128,9 @@ def on_user_confirms_interpretation(structured_query_str, cot_text):
     payload = {
         "query": "CONFIRMED",
         "structured_query": structured_query,
-        "cot": cot_text
+        "cot": cot_text,
+        "original_query": original_query,   # NEW
+        "original_cot": original_cot        # NEW
     }
     resp = requests.post(API_SUBMIT_URL, json=payload)
     result = resp.json()
@@ -227,17 +237,13 @@ with gr.Blocks() as demo:
     cot_output = gr.Textbox(label="Chain of Thoughts (editable)", lines=10, interactive=True)
 
     structured_query_output = gr.State()
-    """
-    gr.Code(
-        label="Structured Query (editable JSON)",
-        language="json",
-        interactive=True,
-        visible=True
-    )
-    """
 
     status_output = gr.Textbox(label="Status / Task ID")
     iframe_display = gr.HTML(label="Generated Plots")
+
+    # NEW hidden states
+    original_query_state = gr.State()
+    original_cot_state = gr.State()
 
     submit_btn = gr.Button("Submit Query")
     confirm_btn = gr.Button("✅ Confirm Interpretation", visible=False)
@@ -270,13 +276,15 @@ with gr.Blocks() as demo:
             flag_btn,
             submit_btn,
             cot_output,
-            structured_query_output
+            structured_query_output,
+            original_query_state,   # NEW
+            original_cot_state      # NEW
         ],
     )
 
     confirm_btn.click(
         fn=on_user_confirms_interpretation,
-        inputs=[structured_query_output, cot_output],
+        inputs=[structured_query_output, cot_output, original_query_state, original_cot_state],  # NEW
         outputs=[status_output, iframe_display],
     )
 
