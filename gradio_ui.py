@@ -24,71 +24,41 @@ def submit_query_to_orchestrator(user_input):
         cot_text = "\n".join(
             f"[{t['role'].upper()} - {t['type']}] {t['content']}" for t in thoughts
         )
-
         structured_query_str = json.dumps(structured_query, indent=2)
 
         if status == "CLARIFY":
             question = result.get("question", "Is this interpretation correct?")
             status_msg = f"[CLARIFICATION] {question}"
-            return (
-                cot_text,
-                structured_query_str,
-                status_msg,
-                gr.update(visible=True),    # confirm_btn
-                gr.update(visible=True),    # reject_btn
-                gr.update(visible=False),   # flag_btn
-                gr.update(visible=False),   # submit_btn
-                gr.update(visible=True),    # cot_output
-                gr.update(visible=True),    # structured_query_output
-                user_input,                 # NEW → original_query
-                cot_text                    # NEW → original_cot
-            )
-
         elif status == "PENDING":
             task_id = result.get("task_id")
             status_msg = f"Task submitted with ID: {task_id}"
-            return (
-                cot_text,
-                structured_query_str,
-                status_msg,
-                gr.update(visible=False),   # confirm_btn
-                gr.update(visible=False),   # reject_btn
-                gr.update(visible=False),   # flag_btn
-                gr.update(visible=False),   # submit_btn
-                gr.update(visible=True),    # cot_output
-                gr.update(visible=True),    # structured_query_output
-                user_input,                 # NEW → original_query
-                cot_text                    # NEW → original_cot
-            )
-
         else:
-            return (
-                cot_text,
-                structured_query_str,
-                f"Unexpected status: {status}",
-                gr.update(visible=False),
-                gr.update(visible=False),
-                gr.update(visible=False),
-                gr.update(visible=False),
-                gr.update(visible=True),
-                gr.update(visible=True),
-                user_input,                 # NEW
-                cot_text                    # NEW
-            )
+            status_msg = f"Unexpected status: {status}"
+
+        # Always return exactly 9 outputs
+        return (
+            cot_text,                # cot_output
+            structured_query_str,    # structured_query_output
+            status_msg,              # status_output
+            gr.update(visible=(status=="CLARIFY")),  # confirm_btn
+            gr.update(visible=(status=="CLARIFY")),  # reject_btn
+            gr.update(visible=False),                # flag_btn
+            gr.update(visible=False),                # submit_btn
+            user_input,              # original_query_state
+            cot_text                 # original_cot_state
+        )
 
     except Exception as e:
         return (
-            "",
-            "{}",
-            f"Exception: {str(e)}",
+            "",                      # cot_output
+            "{}",                    # structured_query_output
+            f"Exception: {str(e)}",  # status_output
             gr.update(visible=False),
             gr.update(visible=False),
             gr.update(visible=False),
             gr.update(visible=False),
-            gr.update(visible=True),
-            gr.update(visible=True),
-            user_input,                     # NEW (still pass query for debugging)
-            ""                              # NEW (empty original_cot if fail)
+            user_input,              # original_query_state (still keep for debugging)
+            ""                       # original_cot_state
         )
 
 # -----------------------------------------
@@ -119,16 +89,22 @@ def on_user_rejects_interpretation(structured_query_str):
 # -----------------------------------------
 # When user confirms interpretation
 # -----------------------------------------
-def on_user_confirms_interpretation(structured_query_str, cot_text, original_query, original_cot):
+def on_user_confirms_interpretation(structured_query_str, cot_text, user_query, original_query, original_cot):
     try:
         structured_query = json.loads(structured_query_str) if structured_query_str else {}
     except Exception as e:
         return f"❌ Invalid JSON in structured query: {e}", ""
 
+    print(">>> on_user_confirms_interpretation inputs <<<")
+    print("structured_query_str:", structured_query_str[:200])
+    print("cot_text:", cot_text[:200])
+    print("user_query:", user_query)
+    print("original_query:", original_query)
+
     payload = {
-        "query": "CONFIRMED",
+        "query": user_query.strip(),
         "structured_query": structured_query,
-        "cot": cot_text,
+        "cot": cot_text.strip(),
         "original_query": original_query,   # NEW
         "original_cot": original_cot        # NEW
     }
@@ -275,8 +251,6 @@ with gr.Blocks() as demo:
             reject_btn,
             flag_btn,
             submit_btn,
-            cot_output,
-            structured_query_output,
             original_query_state,   # NEW
             original_cot_state      # NEW
         ],
@@ -284,7 +258,13 @@ with gr.Blocks() as demo:
 
     confirm_btn.click(
         fn=on_user_confirms_interpretation,
-        inputs=[structured_query_output, cot_output, original_query_state, original_cot_state],  # NEW
+        inputs=[
+            structured_query_output,   # JSON (may be stale unless edited)
+            cot_output,                # ✅ edited CoT textbox
+            user_input,                # ✅ edited query textbox
+            original_query_state,      # keep original for audit
+            original_cot_state         # keep original for audit
+        ],
         outputs=[status_output, iframe_display],
     )
 

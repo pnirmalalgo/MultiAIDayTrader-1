@@ -327,7 +327,7 @@ RULES FOR CODE GENERATION:
         ---
 
         FOLLOW THESE INSTRUCTIONS AND RULES:
-        {prompt}
+        {CODEGEN_PROMPT}
 
         IMPORTANT: First explain your reasoning under ---THOUGHTS---. 
         Then write the executable Python code under ---CODE---.

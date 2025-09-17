@@ -12,7 +12,7 @@ class OrchestratorAgent:
         self.logs = []
     
 
-    def clean_cot_text(cot_text: str) -> str:
+    def clean_cot_text(self, cot_text: str) -> str:
         """
         Remove '[ROLE - TYPE]' prefixes and return only the raw text lines.
         """
@@ -82,7 +82,7 @@ class OrchestratorAgent:
             "thoughts": self.thoughts
         }
 
-    def execute_confirmed_query(self, structured_query: dict, cot: str = None, original_cot: str = None, original_query: str = None):
+    def execute_confirmed_query(self, structured_query: dict, cot: str = None, original_cot: str = None, query: str = None, original_query: str = None):
         self.thoughts = []
         self.log_plan("Executing confirmed structured query.")
 
@@ -90,21 +90,22 @@ class OrchestratorAgent:
         self.thoughts = []
         self.log_plan("Executing confirmed structured query.")
 
-        # ✅ Check if user edited CoT
-        if cot and original_cot and cot.strip() != original_cot.strip():
-            self.log_message("orchestrator", "User edited Chain of Thoughts. Re-interpreting query.")
-            cleaned_cot = self.clean_cot_text(cot)
+        # ✅ Step 1: Handle user edits (query and/or CoT together)
+        if (query and original_query and query.strip() != original_query.strip()) or \
+        (cot and original_cot and cot.strip() != original_cot.strip()):
+            self.log_message("orchestrator", "User edited Query and/or CoT. Re-interpreting with updated inputs.")
 
-            # 🔁 Call interpreter again with original query + edited cot
+            cleaned_cot = self.clean_cot_text(cot) if cot else ""
+
             result = interpret_query_mcp({
-                "query": original_query,
+                "query": query or original_query,   # prefer updated query if present
                 "cot": cleaned_cot
             })
 
             structured_query = result.get("action_input", structured_query)
             thoughts = result.get("thought") or result.get("thoughts", "")
             self.log_message("interpreter", thoughts)
-
+            
         # Step 1: Resolve tickers
         try:
             self.log_command("call:ticker_lookup")

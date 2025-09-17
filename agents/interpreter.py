@@ -27,6 +27,7 @@ def extract_json_from_cot(output: str):
 
 def interpret_query_mcp(input: dict) -> dict:
     user_query = input.get("query", "").strip()
+    user_cot = input.get("cot", "").strip()
 
     if not user_query:
         return {
@@ -36,8 +37,15 @@ def interpret_query_mcp(input: dict) -> dict:
         }
 
     today = datetime.date.today().isoformat()
+
+    cot_hint = f"\nThe user also provided these reasoning notes (CoT): {user_cot}\n" if user_cot else ""
+
     prompt = f"""
 You are a trading query interpreter.
+
+{cot_hint}
+...
+
 
 1. First, write your reasoning step by step under "Thoughts:".
 2. Then, write the structured query in strict JSON format under "Structured Query:".
@@ -112,7 +120,7 @@ The user has provided the following backtest query: {user_query}
 """
 
     response = llm.invoke([HumanMessage(content=prompt)])
-    print("DEBUG — Raw LLM output before parsing:", response)
+    print("DEBUG — Raw LLM output before parsing:", response.content)
 
     text_output = response.content
     if "Structured Query:" in text_output:

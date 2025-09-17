@@ -95,6 +95,7 @@ async def submit_query(req: QueryRequest):
                 structured_query=req.structured_query,
                 cot=req.cot,
                 original_cot=req.original_cot,
+                query=req.query,
                 original_query=req.original_query,
             )
             print("DEBUG result from code generation:", result)
