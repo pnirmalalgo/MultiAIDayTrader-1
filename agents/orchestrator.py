@@ -82,31 +82,31 @@ class OrchestratorAgent:
             "thoughts": self.thoughts
         }
 
-    def execute_confirmed_query(self, structured_query: dict, cot: str = None, original_cot: str = None, query: str = None, original_query: str = None):
+    def execute_confirmed_query(self, structured_query: dict,
+        cot: str = None,
+        original_cot: str = None,
+        query: str = None,
+        original_query: str = None
+    ):
         self.thoughts = []
         self.log_plan("Executing confirmed structured query.")
 
-        #added extra step to check if CoT of interpreter is changed by user:
-        self.thoughts = []
-        self.log_plan("Executing confirmed structured query.")
-
-        # ✅ Step 1: Handle user edits (query and/or CoT together)
-        if (query and original_query and query.strip() != original_query.strip()) or \
-        (cot and original_cot and cot.strip() != original_cot.strip()):
-            self.log_message("orchestrator", "User edited Query and/or CoT. Re-interpreting with updated inputs.")
+        # ✅ Step 1: If CoT is edited, use it as the absolute truth
+        if cot and original_cot and cot.strip() != original_cot.strip():
+            self.log_message("orchestrator", "User edited CoT. Re-interpreting using updated CoT as query.")
 
             cleaned_cot = self.clean_cot_text(cot) if cot else ""
 
             result = interpret_query_mcp({
-                "query": query or original_query,   # prefer updated query if present
+                "query": cleaned_cot,   # 🔑 updated CoT replaces old query
                 "cot": cleaned_cot
             })
 
             structured_query = result.get("action_input", structured_query)
             thoughts = result.get("thought") or result.get("thoughts", "")
             self.log_message("interpreter", thoughts)
-            
-        # Step 1: Resolve tickers
+
+        # ✅ Step 2: Resolve tickers
         try:
             self.log_command("call:ticker_lookup")
             raw_tickers = structured_query.get("ticker", [])
@@ -120,7 +120,7 @@ class OrchestratorAgent:
                 "thoughts": self.thoughts
             }
 
-        # Step 2: Fetch stock data
+        # ✅ Step 3: Fetch stock data
         try:
             self.log_command("call:fetch_stock_data")
             start = structured_query["start_date"]
@@ -134,17 +134,11 @@ class OrchestratorAgent:
                 "thoughts": self.thoughts
             }
 
-        # ✅ Step 3: Translator — enrich structured query into actionable instructions
+        # ✅ Step 4: Translator — enrich structured query into actionable instructions
         try:
             self.log_command("call:translator")
-            if not cot:
-                cot = ""
-
-            #temporary fix to make cot = "" for translator. we do not need to send cot to translator as of now.
-            cot = ""            
             structured_query["remarks"] = structured_query.get("remarks", "")
-            structured_query["remarks"] = (structured_query["remarks"] + " " + cot).strip()
-            trans_result = translator_mcp({"structured_query": structured_query})    
+            trans_result = translator_mcp({"structured_query": structured_query})
 
             enriched_query = trans_result.get("structured_query", structured_query)
             translator_instructions = trans_result
@@ -152,7 +146,6 @@ class OrchestratorAgent:
 
             self.log_message("translator", f"Translator output keys: {list(trans_result.keys())}")
 
-            # Log translator reasoning
             translator_thoughts = trans_result.get("thought", "")
             self.log_message("translator", translator_thoughts)
 
@@ -163,13 +156,13 @@ class OrchestratorAgent:
                 "thoughts": self.thoughts
             }
 
-        # Step 4: CodeGen
+        # ✅ Step 5: CodeGen
         try:
             self.log_command("call:codegen")
             code_result = codegen_mcp({
                 "structured_query": structured_query,
-                "translated_query": enriched_query,   # ✅ use enriched translator output
-                "instructions": translator_instructions,  # ✅ forward instructions if needed
+                "translated_query": enriched_query,
+                "instructions": translator_instructions,
                 "code_tasks": code_tasks
             })
 
@@ -182,7 +175,6 @@ class OrchestratorAgent:
 
             code = code_result["action_input"]
 
-            # Log codegen thoughts
             codegen_thoughts = code_result.get("full_thought", code_result.get("thought", ""))
             for line in codegen_thoughts.strip().splitlines():
                 self.log_message("codegen", line.strip())
@@ -193,8 +185,8 @@ class OrchestratorAgent:
                 "error": f"Codegen error: {str(e)}",
                 "thoughts": self.thoughts
             }
-        
-        # Step 5: Submit to Celery
+
+        # ✅ Step 6: Submit to Celery
         try:
             self.log_command("call:executor")
             task = run_python_code.delay(code)
@@ -210,6 +202,7 @@ class OrchestratorAgent:
                 "error": f"Task submission failed: {str(e)}",
                 "thoughts": self.thoughts
             }
+
 
     # ---- Logging helpers ----
     def log_plan(self, content):

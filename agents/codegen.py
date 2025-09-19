@@ -13,13 +13,31 @@ llm = ChatOpenAI(
     model="gpt-4o-mini"
 )
 
-def codegen_mcp(input: dict) -> dict:
+def codegen_mcp(payload: dict) -> dict:
     curr_time_stamp = datetime.now().isoformat()
 
-    translated = input.get("translated_query", {})
-    structured_query = input.get("structured_query", {})
 
-    print("Input to CodeGen MCP:", input)
+    #translated = payload.get("translated_query", {})
+    #structured_query = payload.get("structured_query", {})
+    # find translator output in common places
+    translated = {}
+    # priority: explicit translated_query -> instructions -> top-level translated/instructions
+    if isinstance(payload.get("translated_query"), dict) and payload.get("translated_query"):
+        translated = payload["translated_query"]
+    elif isinstance(payload.get("instructions"), dict) and payload.get("instructions"):
+        translated = payload["instructions"]
+    elif isinstance(payload.get("translated"), dict) and payload.get("translated"):
+        translated = payload["translated"]
+    else:
+        # last resort: use structured_query if it already contains instruction-like keys
+        translated = payload.get("translated_query") or payload.get("instructions") or payload.get("structured_query") or {}
+
+    structured_query = payload.get("structured_query", {}) or {}
+    trade_management = translated.get("trade_management", {})
+    reentry_rule = trade_management.get("reentry_rule", "")
+
+
+    print("Input to CodeGen MCP:", payload)
     if not translated and not structured_query:
         return {
             "thought": "Neither translated_query nor structured_query provided.",
@@ -29,15 +47,21 @@ def codegen_mcp(input: dict) -> dict:
 
     # Prefer translator output
     strategy = translated.get("strategy_plan") or structured_query.get("strategy_description", "")
-    buy_condition = translated.get("buy_condition_code") or structured_query.get("buy_condition", "")
-    sell_condition = translated.get("sell_condition_code") or structured_query.get("sell_condition", "")
+    #buy_condition = translated.get("buy_condition_code") or structured_query.get("buy_condition", "")
+    buy_condition = translated.get("buy_spec", {}).get("conditions", [])
+    sell_condition = translated.get("sell_spec", {}).get("conditions", [])
+
+    print("Buy conditions:", buy_condition)
+    print("Sell conditions:", sell_condition)
+
+    #sell_condition = translated.get("sell_condition_code") or structured_query.get("sell_condition", "")
     duration_type = structured_query.get("duration_type", "")
     duration_days = int(structured_query.get("duration_days", 0))
     remarks = translated.get("remarks") or structured_query.get("remarks", "")
 
     translator_notes = translated.get("codegen_instructions", "")
-    code_tasks = input.get("code_tasks", [])
-    
+    #code_tasks = input.get("code_tasks", [])
+    code_tasks = translated.get("code_tasks", [])
     print("Code tasks for CodeGen:", code_tasks)
 
     CODEGEN_PROMPT = """
@@ -53,6 +77,26 @@ Do not mix them.
 ---
 
 RULES FOR CODE GENERATION:
+
+GOLDEN RULES (you must respect these before anything else):
+1. Never recompute indicators inside the loop — always precompute. 
+2. Always shift rolling windows by 1 day so today is compared to the past only. 
+3. Always update portfolio value after executing buy/sell logic, not before. 
+4. Always use trades list (not df masks) for entry_price, stop-loss, take-profit, and plotting. 
+5. Always force-close last open trade on final date and set portfolio_series.iloc[-1] = cash. 
+6. All calculations, trades, metrics, and plots are per ticker independently. 
+7. Do not truncate the last buy trade.
+        1. If the strategy ends with an open position (i.e., last trade is a buy), then automatically close it on the final available closing price in the dataset.
+        2. Record this as a sell trade at the last date.
+        3. Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
+        4. If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
+- Always guard sell conditions with `position == 1` AND `entry_price is not None`.
+    - Never include `entry_price` in any vectorized pandas Series expressions. 
+    - `entry_price` must only be used inside the backtest loop, guarded with `if position == 1 and entry_price is not None:`.
+    - All stop_loss and take_profit checks must be loop-based using entry_price (scalar), not vectorized.
+- Do not reference entry_price in calculations unless it is not None.
+- This prevents NoneType errors in stop-loss/take-profit logic.
+
 1. **Data Handling**
    - Load data from SQLite (no external APIs). Database: market_data.db Table: stock_data Columns: "Date", "Open", "High", "Low", "Close", "Volume"
    - Convert Date to datetime, sort ascending, set as index.
@@ -74,18 +118,25 @@ RULES FOR CODE GENERATION:
    - Do not recompute indicators inside the backtest loop.
    - If translator_instructions contains `indicators_to_plot`, ensure every item in that list is explicitly plotted in the strategy figure.
 
+
 3. ***Implement Buy/Sell logic exactly as defined in translator_instructions:***
    - Only execute Buy if position == 0.
    - Only execute Sell if position == 1.
+   - In the loop, always check:
+    if position == 1 and entry_price is not None:
+        sell_cond_rsi = current_rsi > 70
+        sell_cond_sl = current_price <= entry_price * (1 - STOP_LOSS_PERCENT/100)
+        sell_cond_tp = current_price >= entry_price * (1 + TAKE_PROFIT_PERCENT/100)
+        if sell_cond_rsi or sell_cond_sl or sell_cond_tp:
+            # execute sell
+    - The Buy condition must include `and not waiting_for_reset`.
+    - The Sell condition must always set `shares = 0` after executing the sell.
+    - This ensures the portfolio is fully liquid after any exit.
+
    - Always **check `position` before executing sell**, so sells do not occur without a prior buy.
    - Respect stop-loss and take-profit only if explicitly provided.
    - Track trades as (action, date, price) in a list.
    - **Always use the trades list for determining entry price and for any sell conditions — do not compute sell signals from the DataFrame alone.**
-   - Do not truncate the last buy trade.
-        1. If the strategy ends with an open position (i.e., last trade is a buy), then automatically close it on the final available closing price in the dataset.
-        2. Record this as a sell trade at the last date.
-        3. Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
-        4. If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
    - For crossovers (golden/death cross, RSI thresholds, etc.):
      - Use explicit detection: `cond = (A > B) & (A.shift(1) <= B.shift(1))` for cross above.
      - Similarly, `cond = (A < B) & (A.shift(1) >= B.shift(1))` for cross below.
@@ -104,12 +155,13 @@ RULES FOR CODE GENERATION:
    - Append trades with (`action`, `date`, `price`).
    - No Sell without an active Buy.
    - Ensure every Buy has a later matching Sell (align trades before plotting).
-   - Do not truncate the last buy trade.
-        1. If the strategy ends with an open position (i.e., last trade is a buy), then automatically close it on the final available closing price in the dataset.
-        2. Record this as a sell trade at the last date.
-        3. Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
-        4. If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
    - When calculating daily portfolio value, always update `portfolio_value = cash + shares * current_price` **after executing Buy/Sell logic** for that day, not before.
+   - When executing a Sell (due to RSI, stop-loss, or take-profit):
+        - Add `shares * current_price` to `cash`.
+        - Explicitly set `shares = 0` immediately after the sell.
+        - Reset `entry_price = None`.
+        - Set `position = 0`.
+        - Update `waiting_for_reset = True` (per re-entry rules).
 
 5. **Portfolio Simulation**
    - Start with initial_capital = 100000 (or 10,000 if specified in translator_instructions).
@@ -118,32 +170,63 @@ RULES FOR CODE GENERATION:
    - Ensure initial capital line spans full index length when plotting.
    - After evaluating buy/sell logic **for each day**, immediately calculate and record portfolio value as `cash + shares * close_price`.
    - Store this daily portfolio value in `portfolio_series` aligned with df index.
+   - portfolio_series must be a pandas Series indexed by df.index, length exactly == len(df). 
+   - If loop starts from i=1, slice df.index[1:]; if from i=0, guard lookbacks with if i > 0. 
    - Align portfolio_series with df index.
    - Only plot portfolio_series in portfolio_fig; do not include other price/indicator traces.
    - Aggregated Buy/Sell markers should appear only in strategy_fig.
+   - After evaluating Buy/Sell logic for the day, immediately calculate:
+      portfolio_value = cash + shares * current_price
+      and store in portfolio_series for that day.
+    - After the final forced sell (if any), **forward-fill the portfolio_series** for remaining days so that the portfolio value remains flat when no shares are held:
+        portfolio_series.ffill(inplace=True)
+    - Ensure that at any point after a Sell, `shares = 0` so portfolio_series correctly reflects a cash-only balance.
+
 
 6. **Performance Metrics**
+    Always compute metrics in this order after trades are complete: 
+        1. cumulative_return 
+        2. daily_returns 
+        3. volatility 
+        4. max_drawdown 
+        5. annualized_return
    - Cumulative Return = (Vend/Vstart - 1) * 100
    - Annualized Return = ((Vend/Vstart) ** (252 / total_days) - 1) * 100. Use total_days = len(df).
    - Volatility = std(daily_returns) * sqrt(252) * 100
    - Max Drawdown = max(1 - portfolio / cummax(portfolio)) * 100
+   
    - Guard against empty DataFrame or zero trades.
    - Save results in form of table with columns Ticker, Cumulative Return, Annualized Return, Volatility and Max Drawdown and one row for each ticker. Save table to trading_results.html.
+   Aggregate-metrics and output file rule (MANDATORY):
+- DO NOT save `trading_results.html` inside the per-ticker processing function. The per-ticker function (e.g., process_ticker) MUST return: `(metrics_dict, generated_files_for_this_ticker)`.
+- The top-level script MUST:
+    1. Loop over tickers, call process_ticker, collect all metrics dicts into `all_metrics` list and extend `all_generated_files` with each ticker's files.
+    2. After the loop, create `results_df = pd.DataFrame(all_metrics)` and SAVE `results_df.to_html('trading_results.html', index=False)` ONCE — so the results table has one row per ticker.
+    3. Append 'trading_results.html' to `all_generated_files`.
+    4. Write `all_generated_files` into `generated_files_{timestamp}.json` and print json.dumps(all_generated_files).
+        - Example pseudocode to be implemented exactly:
+            all_metrics = []
+            all_generated_files = []
+            for ticker in tickers:
+                metrics, files = process_ticker(ticker)
+                all_metrics.append(metrics)
+                all_generated_files.extend(files)
+            results_df = pd.DataFrame(all_metrics)
+            results_df.to_html('trading_results.html', index=False)
+            all_generated_files.append('trading_results.html')
+            with open(f'generated_files_{timestamp}.json','w') as f:
+                json.dump(all_generated_files, f)
+    print(json.dumps(all_generated_files))
 
        ****VERY IMPORTANT*****
-            1. Always update portfolio value **after executing buy/sell** for that day.
+            
             2. Use pandas Series for portfolio values for easier pct_change(), cummax(), and indexing.
             3. Compute daily returns as `portfolio_series.pct_change().dropna()`.
             4. Volatility = daily_returns.std() * sqrt(252) * 100.
             5. Max drawdown = (1 - portfolio_series / portfolio_series.cummax()).max() * 100.
             6. Annualized return = ((final_portfolio_value / initial_capital) ** (252 / n_days) - 1) * 100, where n_days = len(df).
-            7. Do not truncate the last buy trade.
-                - If the strategy ends with an open position (i.e., last trade is a buy), then automatically close it on the final available closing price in the dataset.
-                - Record this as a sell trade at the last date.
-                - Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
-                - If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
-            8. All calculations (MA, RSI, returns) should be **per ticker**, even for multi-ticker backtests.
-            9. If no trades are executed during the backtest, set all performance metrics (cumulative return, annualized return, volatility, max drawdown) to 0 and print "No trades executed in this period.".
+            7. All calculations (MA, RSI, returns) should be **per ticker**, even for multi-ticker backtests.
+            8. If no trades are executed during the backtest, set all performance metrics (cumulative return, annualized return, volatility, max drawdown) to 0 and print "No trades executed in this period.".
                 - Only calculate metrics using the portfolio_series when trades exist.
                 - Plotting should also skip buy/sell markers gracefully if no trades were executed.
         
@@ -177,12 +260,6 @@ RULES FOR CODE GENERATION:
         Portfolio update: After buy/sell logic, update portfolio_value = cash + shares * current_price and store in portfolio_series.
         - **Important:** Do not update portfolio before the buy/sell logic — always update after executing trades for the day.
 
-        Handle unmatched trades: - Do not truncate the last buy trade.
-        1. If the strategy ends with an open position (i.e., last trade is a buy), then automatically close it on the final available closing price in the dataset.
-        2. Record this as a sell trade at the last date.
-        3. Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
-        4. If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
-
         Calculate performance metrics per ticker.
 
         Cumulative Return = (final_portfolio_value / initial_capital - 1) * 100
@@ -215,18 +292,54 @@ RULES FOR CODE GENERATION:
 
         Save per-ticker HTML plots and the final results table (results.to_html()).
 
+*****Important implementation details:******
+- IMPORTANT: Never call .shift() on scalar variables like current_rsi. 
+  .shift() must only be applied to pandas Series, e.g. df['RSI'].shift(1).
+- Precompute all crossover signals at the DataFrame/Series level before entering the backtest loop. 
+  Example: df['buy_signal'] = (df['RSI'] > 30) & (df['RSI'].shift(1) <= 30)
+- Inside the loop, refer to df['buy_signal'].iloc[i] (or .iat[i]) instead of applying shift again.
+
+- Always initialize variables before the backtest loop.
+  For example:
+    position = 0
+    entry_price = None
+    shares = 0
+    cash = INITIAL_CAPITAL
+- When entering a trade (buy), set entry_price = current_price.
+- When exiting a trade (sell), reset entry_price = None.
+- Always initialize `entry_price = None` before the backtest loop.
+- Update `entry_price` to the trade’s price whenever a buy order is executed.
+- Reset `entry_price` back to None whenever a position is closed.
+- Do NOT use entry_price inside vectorized DataFrame conditions.
+- All stop_loss and take_profit checks that depend on entry_price must be handled INSIDE the backtest loop, only when position == 1 and entry_price is not None.
+- At the DataFrame level, only precompute indicator-based signals (like RSI crossovers). Do not mix entry_price-dependent logic with Series operations.
+- Example:
+    df['buy_signal'] = (df['RSI'] > 30) & (df['RSI'].shift(1) <= 30)
+
+    # In loop:
+    if position == 1 and entry_price is not None:
+        sell_cond_rsi = current_rsi > 70
+        sell_cond_sl = current_price <= entry_price * 0.95
+        sell_cond_tp = current_price >= entry_price * 1.15
+        if sell_cond_rsi or sell_cond_sl or sell_cond_tp:
+        
+- When checking stop-loss or take-profit, always guard the calculation:
+    only evaluate conditions if `entry_price is not None` and `position == 1`.
+    Example:
+        if position == 1 and entry_price is not None:
+            sell_cond_stop_loss = current_price <= entry_price * (1 - STOP_LOSS_PERCENT / 100)
+            sell_cond_take_profit = current_price >= entry_price * (1 + TAKE_PROFIT_PERCENT / 100)
+
+- In sell conditions, always check entry_price is not None before using it.
+
+
 7. **Plots** (Use plotly, save as HTML)
     "IMPORTANT: Your trades list already contains executed buys/sells (tuples (action,date,price)). Use that list to plot markers and to derive entry_price for stop-loss/take-profit logic — do NOT recompute or infer trades from indicator boolean masks."
 
    - Strategy Plot: - Include price, all indicators in `indicators_to_plot`, and buy/sell markers.
    - Buy/Sell markers on strategy plot must reflect the **trades list**, NOT the raw indicator conditions.
    - Do not use DataFrame boolean masks (like `RSI<30`) for plotting; only use dates/prices from executed Buy/Sell tuples (i.e. from the trades list).
-   - Do not truncate the last buy trade.
-        1. If the strategy ends with an open position (i.e., last trade is a buy), then automatically close it on the final available closing price in the dataset.
-        2. Record this as a sell trade at the last date.
-        3. Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
-        4. If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
-
+   
    - Plot a single Scatter trace for all Buys and another for all Sells to avoid multiple legend entries.
    - Portfolio Plot: daily portfolio value (initial investment baseline if specified).
    *PLOT RULES — REQUIRED IMPLEMENTATION DETAILS (copy/paste safe)*
@@ -280,7 +393,12 @@ RULES FOR CODE GENERATION:
    - Ensure metrics don’t crash on empty datasets.
    - Avoid deprecated methods like DataFrame.append(); use pd.concat() or build a list of dicts.
    - Perform all calculations per ticker; treat a single ticker as a special case.
-   - Update portfolio after buy/sell execution.
+   - Indicators cross-check (CODEGEN must implement):
+        - Before running a backtest, assert that all `indicators` named in translator_instructions exist as DataFrame columns after computation. If any are missing, raise a clear error and stop.
+        - If translator_instructions contains buy_spec/sell_spec conditions referencing indicator columns that do not exist, raise/return an error rather than generate code silently.
+   - Safety check — generated_files:
+        - The generated_files list must contain exactly the file names produced by the script (per-ticker plots + aggregated trading_results.html). Do not overwrite generated_files between tickers.
+
 
 10. **Code Style**
    - Must be executable as-is (imports included).
@@ -297,6 +415,44 @@ RULES FOR CODE GENERATION:
     - Only reset `can_reenter` according to the reentry_rule (examples: wait until RSI < 30 and then new crossover above 30; or wait until indicator leaves overbought zone).
     - Prevent new Buys while `can_reenter == False` even if buy condition is True.
     - Document the state reset condition in the code as comments and implement it exactly (e.g., `if current_rsi < 30: can_reenter = True` or a more specific rule if translator provided one).
+- For every translator buy_spec or sell_spec with operator "crosses_above" or "crosses_below":
+    - Implement a boolean state variable: waiting_for_reset or can_reenter.
+    - After a trade is executed (buy or sell), set can_reenter = False.
+    - Only reset can_reenter according to the reentry_rule:
+        * Wait until the relevant indicator leaves the overbought/oversold zone.
+        * Only allow new trades when can_reenter == True AND crossover condition occurs.
+    - Include exact pandas hint with .shift(1), e.g.,
+        buy_cond = (df['RSI'] > 30) & (df['RSI'].shift(1) <= 30) & (can_reenter == True)
+    - Document the reset condition in code comments.
+- Buy condition safeguard:
+    - When coding the buy rule, always enforce waiting_for_reset == False as part of the condition.
+    - After a sell, set waiting_for_reset = True.
+    - Do not allow a new buy while waiting_for_reset == True, even if the RSI or crossover condition is true.
+    - Reset waiting_for_reset = False only when the relevant indicator (e.g., RSI) fully exits the oversold/overbought region, so that the next trade requires a fresh crossover.
+    - Explicitly include and not waiting_for_reset in the buy condition.
+        Re-entry safeguard (must be applied to ANY buy/sell condition):
+
+        # At initialization
+        waiting_for_reset = False
+
+        # Buy condition
+        if position == 0 and not waiting_for_reset and <buy_signal>:
+            BUY
+            position = 1
+            entry_price = current_price
+
+        # Sell condition
+        if position == 1 and entry_price is not None and <sell_signal>:
+            SELL
+            position = 0
+            entry_price = None
+            waiting_for_reset = True
+
+        # Reset condition
+        waiting_for_reset should remain True until the relevant indicator
+        (first used in <buy_signal> or <sell_signal>) fully exits its trigger zone.  
+        Only then set waiting_for_reset = False, so the next trade requires a fresh signal.
+
 
 ---OUTPUT FORMAT REQUIRED FROM LLM---
 - Produce **only** two sections:
@@ -310,6 +466,11 @@ RULES FOR CODE GENERATION:
 - If translator_instructions includes `indicators_to_plot`, ensure they are plotted and included in strategy_fig.
 - If no trades executed, code should still create `trading_results.html` containing a one-row table where metrics are zero and include a note "No trades executed in this period." and include that filename in `generated_files`.
 - Use initial_capital value from translator_instructions if provided; otherwise default to 10000.
+- Implement `waiting_for_reset` logic exactly as described in the provided REENTRY_RULE.
+  * After a Sell, set waiting_for_reset = True.
+  * Do not allow any new Buy while waiting_for_reset is True.
+  * Only set waiting_for_reset = False once the reset condition from REENTRY_RULE is satisfied.
+  * Explicitly include `and not waiting_for_reset` in the Buy condition.
 
 ---END PROMPT---
 """
@@ -321,6 +482,9 @@ RULES FOR CODE GENERATION:
         TRANSLATOR_INSTRUCTIONS (JSON):
         {translated}
 
+        REENTRY_RULE (from translator):
+        {reentry_rule}
+
         CODE_TASKS (ordered steps):
         {code_tasks}
 
@@ -328,7 +492,6 @@ RULES FOR CODE GENERATION:
 
         FOLLOW THESE INSTRUCTIONS AND RULES:
         {CODEGEN_PROMPT}
-
         IMPORTANT: First explain your reasoning under ---THOUGHTS---. 
         Then write the executable Python code under ---CODE---.
         """)
