@@ -96,7 +96,14 @@ GOLDEN RULES (you must respect these before anything else):
     - All stop_loss and take_profit checks must be loop-based using entry_price (scalar), not vectorized.
 - Do not reference entry_price in calculations unless it is not None.
 - This prevents NoneType errors in stop-loss/take-profit logic.
+MUST: Guard all entry_price arithmetic.
+- Anywhere the generated code uses `entry_price` in arithmetic (stop-loss, take-profit, risk calcs), it MUST first check `position == 1` AND `entry_price is not None` (or `shares > 0`) before performing the calculation.
+- Example requirement wording to include: "Do not perform `entry_price * ...` unless `position == 1 and entry_price is not None`."
 
+8. MUTUAL EXCLUSIVITY (MUST): Trade decision code MUST use mutually-exclusive branches so a single bar cannot execute both Buy and Sell.
+   - The generated backtest loop MUST follow the provided TRADE LOOP TEMPLATE below exactly (or an equivalent that uses `if ... elif ...` semantics and an executed_action guard).
+   - Do not produce two independent `if` blocks for buy and sell. If buy logic executes on a bar, sell logic must be skipped for that same bar.
+-------#####--------
 1. **Data Handling**
    - Load data from SQLite (no external APIs). Database: market_data.db Table: stock_data Columns: "Date", "Open", "High", "Low", "Close", "Volume"
    - Convert Date to datetime, sort ascending, set as index.
@@ -331,6 +338,9 @@ GOLDEN RULES (you must respect these before anything else):
             sell_cond_take_profit = current_price >= entry_price * (1 + TAKE_PROFIT_PERCENT / 100)
 
 - In sell conditions, always check entry_price is not None before using it.
+- When writing the backtesting loop:
+    - Always structure trade conditions using `if ... elif ...` instead of two separate `if` blocks, so that buy and sell actions cannot both trigger on the same day.
+    - Ensure that once a Buy or Sell executes, the other condition is skipped for that bar.
 
 
 7. **Plots** (Use plotly, save as HTML)
@@ -383,8 +393,10 @@ GOLDEN RULES (you must respect these before anything else):
        4. If the code creates additional supporting files (logs, CSVs), add them to `generated_files` as well.
 
 9. **Safety Checks**
+    - Always include all necessary library imports at the top, such as import pandas as pd, import numpy as np, import ta, and import sqlite3.
    - Ensure Buy/Sell alignment.
    - Verify Buy/Sell alignment: no consecutive Buys or consecutive Sells.
+   - After trades are generated, ensure no two trades occur on the same bar/timestamp. If both Buy and Sell conditions would hold simultaneously, only the Buy should take precedence (or vice versa if more natural for the strategy).
    - Ensure portfolio_series updates correctly according to position state.
    - Verify portfolio_series length matches df.index and reflects trade updates.
    - Verify buy/sell marker traces appear only once in legend each.
@@ -398,6 +410,14 @@ GOLDEN RULES (you must respect these before anything else):
         - If translator_instructions contains buy_spec/sell_spec conditions referencing indicator columns that do not exist, raise/return an error rather than generate code silently.
    - Safety check — generated_files:
         - The generated_files list must contain exactly the file names produced by the script (per-ticker plots + aggregated trading_results.html). Do not overwrite generated_files between tickers.
+
+    - RUNTIME SAFETY (MUST include simple runtime guards):
+        1. Before any sell logic that uses entry_price, require:
+        if not (position == 1 and entry_price is not None and shares > 0):
+            # skip sell checks that depend on entry_price (or set these sell flags to False)
+        2. When appending a Sell trade, ensure `shares > 0` before cash update and appending. If shares == 0, do not append a Sell; instead log or raise error.
+        3. Final forced close must check `if position == 1 and entry_price is not None and shares > 0:` before executing the final sell.
+    ****Pandas deprecation: Use df.ffill() and df.bfill() instead of df.fillna(method='ffill') / df.fillna(method='bfill').
 
 
 10. **Code Style**
