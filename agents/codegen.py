@@ -13,6 +13,14 @@ llm = ChatOpenAI(
     model="gpt-4o-mini"
 )
 
+def get_code_tasks(translated):
+    for key, value in translated.items():
+        #print(key, ":", value)
+        if key == "code_tasks":
+            return value if isinstance(value, list) else []
+        
+    return []
+
 def codegen_mcp(payload: dict) -> dict:
     curr_time_stamp = datetime.now().isoformat()
 
@@ -37,7 +45,7 @@ def codegen_mcp(payload: dict) -> dict:
     reentry_rule = trade_management.get("reentry_rule", "")
 
 
-    print("Input to CodeGen MCP:", payload)
+    #print("Input to CodeGen MCP:", payload)
     if not translated and not structured_query:
         return {
             "thought": "Neither translated_query nor structured_query provided.",
@@ -48,11 +56,18 @@ def codegen_mcp(payload: dict) -> dict:
     # Prefer translator output
     strategy = translated.get("strategy_plan") or structured_query.get("strategy_description", "")
     #buy_condition = translated.get("buy_condition_code") or structured_query.get("buy_condition", "")
-    buy_condition = translated.get("buy_spec", {}).get("conditions", [])
-    sell_condition = translated.get("sell_spec", {}).get("conditions", [])
+    buy_condition = translated.get("buy_condition", {}).get("conditions", []) or translated.get("buy_spec", {}).get("conditions", [])
+    sell_condition = translated.get("sell_condition", {}).get("conditions", []) or translated.get("sell_spec", {}).get("conditions", [])
+    #code_tasks = translated.get("code_tasks", [])
+    # Try multiple locations in order, stop at the first non-empty list
 
-    print("Buy conditions:", buy_condition)
-    print("Sell conditions:", sell_condition)
+    code_tasks = get_code_tasks(payload)
+    #print("Final code_tasks:", code_tasks)
+
+
+    #print("Buy conditions:", buy_condition)
+    #print("Sell conditions:", sell_condition)
+    #print("Code tasks for CodeGen:", code_tasks)
 
     #sell_condition = translated.get("sell_condition_code") or structured_query.get("sell_condition", "")
     duration_type = structured_query.get("duration_type", "")
@@ -61,8 +76,8 @@ def codegen_mcp(payload: dict) -> dict:
 
     translator_notes = translated.get("codegen_instructions", "")
     #code_tasks = input.get("code_tasks", [])
-    code_tasks = translated.get("code_tasks", [])
-    print("Code tasks for CodeGen:", code_tasks)
+
+
 
     CODEGEN_PROMPT = """
 You are the Code Generator agent in a multi-agent trading system.
@@ -90,7 +105,20 @@ GOLDEN RULES (you must respect these before anything else):
         2. Record this as a sell trade at the last date.
         3. Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
         4. If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
-- Always guard sell conditions with `position == 1` AND `entry_price is not None`.
+
+- For any strategy, always interpret translator conditions (buy_spec, sell_spec, additional_buy thresholds) dynamically rather than hardcoding EMA or RSI levels.
+- All formulas or thresholds from translator instructions must be applied as-is using precomputed DataFrame columns.
+- Always guard entry_price usage:
+      if position == 1 and entry_price is not None:
+          # stop-loss / take-profit / additional buy
+        
+- All sell, stop-loss, take-profit, reentry, and additional buy checks must be inside:
+
+      if position == 1 and entry_price is not None:
+          ...
+
+  This guard is MANDATORY. Never allow code like `current_price < entry_price * ...` outside this block.
+
     - Never include `entry_price` in any vectorized pandas Series expressions. 
     - `entry_price` must only be used inside the backtest loop, guarded with `if position == 1 and entry_price is not None:`.
     - All stop_loss and take_profit checks must be loop-based using entry_price (scalar), not vectorized.
@@ -99,11 +127,91 @@ GOLDEN RULES (you must respect these before anything else):
 MUST: Guard all entry_price arithmetic.
 - Anywhere the generated code uses `entry_price` in arithmetic (stop-loss, take-profit, risk calcs), it MUST first check `position == 1` AND `entry_price is not None` (or `shares > 0`) before performing the calculation.
 - Example requirement wording to include: "Do not perform `entry_price * ...` unless `position == 1 and entry_price is not None`."
+**ENFORCE STRICT GUARD**:
+- Do NOT perform any arithmetic using `entry_price` (e.g., *, /, +, -) **unless**:
+      if position == 1 and entry_price is not None:
+- If a generated line violates this rule, your code MUST raise an Exception or skip it.
+- All reset, take-profit, stop-loss, reentry checks that reference entry_price must live inside this guard.
+- Include explicit examples in the loop:
+
+    if position == 1 and entry_price is not None:
+        if current_price >= entry_price * (1 + TAKE_PROFIT_PERCENT/100):
+            # sell logic
+
+- Any line outside this guard that uses entry_price should never appear.
 
 8. MUTUAL EXCLUSIVITY (MUST): Trade decision code MUST use mutually-exclusive branches so a single bar cannot execute both Buy and Sell.
    - The generated backtest loop MUST follow the provided TRADE LOOP TEMPLATE below exactly (or an equivalent that uses `if ... elif ...` semantics and an executed_action guard).
    - Do not produce two independent `if` blocks for buy and sell. If buy logic executes on a bar, sell logic must be skipped for that same bar.
+
+   
+9. #### ADDITIONAL BUY RULES #####
+- Additional Buy is only executed if position > 0, cash > 0, additional_buy_condition is True, and waiting_for_reset == False.
+- Do NOT merge normal buy and additional buy conditions into one if statement.
+- Always update cash, shares, and portfolio_series immediately after executing an additional buy.
+- Include shares_bought in the trade tuple:
+    Normal Buy tuple: ("Buy", current_date, current_price, shares_bought)
+    Additional Buy tuple: ("Additional Buy", current_date, current_price, shares_bought)
+- Check additional buy **after normal buy logic** but **before sell logic** in each iteration.
+
+For additional buys below entry price, implement sequential buys: 
+- Track number of additional buys per trade. 
+- First additional buy triggers only after first threshold is hit; second triggers only after second threshold. 
+- Prevent multiple additional buys at the same threshold on the same trade.
+
+####Pseudo-code when additional_buy_condition is mentioned:#####
+additional_buy_done = False
+
+for i in range(len(df)):
+    executed_action = None
+
+    # Normal Buy
+    if position == 0 and not waiting_for_reset and normal_buy_condition:
+        execute_normal_buy()
+        position = 1
+        additional_buy_done = False
+        executed_action = "Buy"
+
+    # Additional Buy (safe guarded against NoneType)
+    if position == 1 and entry_price is not None:
+        additional_buy_cond = (
+            df['additional_buy_signal'].iloc[i]
+            if pd.notna(df['additional_buy_signal'].iloc[i]) else False
+        )
+    else:
+        additional_buy_cond = False
+
+    if position > 0 and cash > 0 and not waiting_for_reset and additional_buy_cond and not additional_buy_done:
+        execute_additional_buy()
+        additional_buy_done = True
+        executed_action = "Additional Buy"
+        # Immediately update portfolio value
+        portfolio_series[i] = cash + shares * current_price
+
+    # Sell
+    if position == 1 and entry_price is not None and sell_condition:
+        execute_sell()
+        position = 0
+        waiting_for_reset = True
+        additional_buy_done = False
+        executed_action = "Sell"
+        portfolio_series[i] = cash + shares * current_price
+
+    # If no trade executed this bar, still update portfolio value
+    if executed_action is None:
+        portfolio_series[i] = cash + shares * current_price
+
 -------#####--------
+0. ABSOLUTE NONE-SAFETY RULE:
+   - Never perform arithmetic using `entry_price` unless explicitly guarded.
+   - Any use of entry_price in a calculation (multiplication, division, addition, subtraction) MUST be wrapped in:
+
+        if position == 1 and entry_price is not None:
+            # safe to use entry_price here
+
+   - Outside this guard, entry_price may only be assigned or reset (e.g., entry_price = current_price on Buy, entry_price = None on Sell).
+   - If code would otherwise attempt `entry_price * ...` or similar without this guard, you must skip or raise Exception in generated code.
+
 1. **Data Handling**
    - Load data from SQLite (no external APIs). Database: market_data.db Table: stock_data Columns: "Date", "Open", "High", "Low", "Close", "Volume"
    - Convert Date to datetime, sort ascending, set as index.
@@ -139,7 +247,6 @@ MUST: Guard all entry_price arithmetic.
     - The Buy condition must include `and not waiting_for_reset`.
     - The Sell condition must always set `shares = 0` after executing the sell.
     - This ensures the portfolio is fully liquid after any exit.
-
    - Always **check `position` before executing sell**, so sells do not occur without a prior buy.
    - Respect stop-loss and take-profit only if explicitly provided.
    - Track trades as (action, date, price) in a list.
@@ -151,7 +258,73 @@ MUST: Guard all entry_price arithmetic.
      - Use `entry_price` per trade.
      - stop_loss: `current_price <= entry_price * (1 - stop_loss_pct/100)`.
      - take_profit: `current_price >= entry_price * (1 + take_profit_pct/100)`.
-   - **Calculate all indicator series (RSI, SMA, etc.) before the loop**, do not recalc per iteration.
+
+- If operator is "chained_trend" or "stepwise_trend", use the precomputed formula string in `formula` directly in your loop.
+    - Example: formula = "(df['EMA_20'] < df['EMA_50']) & (df['EMA_50'] < df['EMA_250'])"
+    - Use this as part of `normal_buy_condition` or `sell_condition` inside the backtest loop.
+
+
+- If a condition in translator_instructions contains "relative_to": "entry_price", generate Python code that evaluates the threshold relative to the current entry_price of the open position.
+  - This calculation must occur inside the guard: if position == 1 and entry_price is not None.
+  - Do not precompute or vectorize this threshold outside the backtest loop.
+  - Use entry_price to calculate stop-loss, take-profit, or additional buy thresholds as needed.
+  - Example for an additional buy at -10%:  
+        threshold_price = entry_price * (1 - 0.10)
+        if current_price <= threshold_price:
+            # execute additional buy
+  - Repeat this logic for all percentage-based buy/additional buy/sell conditions referencing "relative_to": "entry_price".
+
+##### Additional Buy Handling####
+##### ADDITIONAL BUY RULES #####
+- Only execute Additional Buy if:
+    1. position > 0
+    2. cash > 0
+    3. additional_buy_condition is True
+    4. waiting_for_reset == False
+- Additional Buy must be **separate from normal buy**; do NOT combine conditions.
+- Only allow **one additional buy per bar** (avoid repeated buys on consecutive bars unless a new trade opens).
+- Immediately update:
+    cash = cash - shares_bought * current_price
+    shares += shares_bought
+    portfolio_series[i] = cash + shares * current_price
+- Append to trades list as ("Additional Buy", date, price, shares_bought)
+- Reset any per-trade flag after sell to allow future additional buys in new trades.
+- Use a flag `additional_buy_done = False` per open position:
+    - Set to True after executing additional buy
+    - Reset to False after the position is closed
+
+- Inside the backtest loop, check if translator_instructions contains "cond_additional_buy".
+- Execute the additional buy **only if position > 0 and cash > 0**.
+- Buy as many shares as possible using available cash at current_price.
+- Append a trade tuple: ("Additional Buy", current_date, current_price, shares_bought) to trades list.
+- Immediately update cash = cash - shares_bought * current_price and shares += shares_bought.
+- Immediately update portfolio_series[i] = cash + shares * current_price.
+- Ensure waiting_for_reset rules are respected: do not execute additional buy if waiting_for_reset == True.
+- Additional buys are separate from normal buy; normal buy only occurs if position == 0.
+
+- Implement sequential additional buys based on multiple thresholds (e.g., -10%, -20%) without overlapping.
+- Track number of additional buys per open trade (e.g., additional_buy_count).
+- Execute first additional buy only if additional_buy_count == 0 and threshold met.
+- Execute second additional buy only if additional_buy_count == 1 and next threshold met.
+- Prevent multiple buys at same threshold on the same trade.
+- Always update cash, shares, portfolio_series, and trades immediately after each additional buy.
+- Ensure this is dynamic: thresholds and number of additional buys come from translator instructions.
+
+##### Additional Notes for Buy Logic ####
+- Normal buy and additional buy are handled in separate conditional blocks.
+- Normal buy executes only if position == 0 and not waiting_for_reset and buy condition is met.
+- Additional buy executes only if position > 0, cash > 0, additional buy condition is met, and waiting_for_reset == False.
+- Do not combine normal and additional buy in a single if condition.
+- In each iteration of the backtest loop:
+    1. Check for normal buy if position == 0
+    2. Check for additional buy if position > 0
+    3. Check for sell conditions
+    4. Update portfolio_series after each trade (buy, additional buy, or sell)
+- Include "shares_bought" in the trade tuple for additional buys: ("Additional Buy", current_date, current_price, shares_bought)
+- Normal buy tuple: ("Buy", current_date, current_price, shares_bought)
+- Always update portfolio_series[i] immediately after executing any trade.
+
+- **Calculate all indicator series (RSI, SMA, etc.) before the loop**, do not recalc per iteration.
 
 4. **Position & Trade Tracking**
    - Track `position` (0 = no position, 1 = holding position), `entry_price`, `cash`, `shares`.
@@ -169,6 +342,29 @@ MUST: Guard all entry_price arithmetic.
         - Reset `entry_price = None`.
         - Set `position = 0`.
         - Update `waiting_for_reset = True` (per re-entry rules).
+
+- Implement `waiting_for_reset` to prevent immediate re-entry after a sell.
+    - After a sell, set `waiting_for_reset = True`.
+    - Reset `waiting_for_reset = False` **only** when indicators return to the negative trend (e.g., stepwise_trend for buy) and NOT during a sell signal.
+    - Do NOT reset waiting_for_reset inside sell logic.
+    - Always include `and not waiting_for_reset` in buy condition.
+    - This ensures dynamic handling for any strategy and avoids premature re-entry.
+
+##### FORCE-CLOSE LAST OPEN TRADE #####
+- After the main loop finishes, check:
+    if position == 1 and entry_price is not None and shares > 0:
+        # execute sell at last available closing price
+        cash += shares * df['Close'].iloc[-1]
+        trades.append(("Sell", df.index[-1], df['Close'].iloc[-1], shares))
+        shares = 0
+        position = 0
+        entry_price = None
+        portfolio_series.iloc[-1] = cash
+- This ensures portfolio_series and performance metrics reflect a fully closed position at the end.
+- Include this step **after daily loop** and before metrics calculation.
+
+VERY IMPORTANT:
+- Whenever generating Python code with multiple logical conditions using & and |, always use parentheses to make the intended order of operations explicit. Ensure the final condition evaluates exactly as described in the logic, rather than relying on Python’s operator precedence.
 
 5. **Portfolio Simulation**
    - Start with initial_capital = 100000 (or 10,000 if specified in translator_instructions).
@@ -287,6 +483,29 @@ MUST: Guard all entry_price arithmetic.
 
         Append dictionaries to a list and convert the list to a DataFrame after the loop (preferred for speed and clarity).
 
+        ##### Portfolio Update Timing ####
+        - **Do NOT update portfolio_series at the start of the loop.**
+        - Update portfolio_series **only after executing all trades** (normal buy, additional buy, or sell) for the current iteration.
+        - At the **end of each backtest loop iteration**, set:
+            portfolio_series.iloc[i] = cash + shares * current_price
+        - This ensures that portfolio value on buy or additional buy days reflects the newly acquired shares.
+        - Always update portfolio_series immediately after executing any trade:
+            1. Normal Buy (position == 0)
+            2. Additional Buy (position > 0)
+            3. Sell (position == 1)
+        - Do not compute portfolio value twice per iteration; only compute **once after all trade logic**.
+
+        ##### PORTFOLIO UPDATE SEQUENCE #####
+        - For each iteration of the backtest loop:
+            1. Check Normal Buy (position == 0)
+                - If executed, immediately update cash, shares, portfolio_series[i]
+            2. Check Additional Buy (position > 0)
+                - If executed, immediately update cash, shares, portfolio_series[i]
+            3. Check Sell (position == 1)
+                - If executed, immediately update cash, shares, portfolio_series[i]
+        - Only compute portfolio_series **once per trade**, never at the start of the loop.
+
+        
         Plotting per ticker
 
         Create two plots per ticker:
@@ -413,8 +632,14 @@ MUST: Guard all entry_price arithmetic.
 
     - RUNTIME SAFETY (MUST include simple runtime guards):
         1. Before any sell logic that uses entry_price, require:
-        if not (position == 1 and entry_price is not None and shares > 0):
+        - if not (position == 1 and entry_price is not None and shares > 0):
             # skip sell checks that depend on entry_price (or set these sell flags to False)
+        - Before any multiplication/division with entry_price, check:
+            if position == 1 and entry_price is not None
+        - If entry_price is None or position == 0, skip any calculation that references it
+        - Never assume entry_price exists
+        - Initialize entry_price = None before the loop
+
         2. When appending a Sell trade, ensure `shares > 0` before cash update and appending. If shares == 0, do not append a Sell; instead log or raise error.
         3. Final forced close must check `if position == 1 and entry_price is not None and shares > 0:` before executing the final sell.
     ****Pandas deprecation: Use df.ffill() and df.bfill() instead of df.fillna(method='ffill') / df.fillna(method='bfill').
@@ -516,6 +741,8 @@ MUST: Guard all entry_price arithmetic.
         Then write the executable Python code under ---CODE---.
         """)
     ]
+        
+        print("input to codegen: ", messages)
 
         response = llm.invoke(messages)
         raw = response.content

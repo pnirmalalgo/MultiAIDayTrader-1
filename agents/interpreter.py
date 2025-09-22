@@ -59,6 +59,8 @@ Use the following schema for each condition:
   - "indicator": "MACD", "operator": "between", "min": 40, "max": 60
   - "indicator": "Price", "operator": "take_profit", "value": 15, "value_type": "percent"
   - "indicator": "Price", "operator": "stop_loss", "value": 10, "value_type": "percent"
+- For crossover or event-based conditions, use:
++   {{"event": {{"indicator1": "<string>", "operator": "cross_above" | "cross_below", "indicator2": "<string>"}}
 
 ### Important rules for stop-loss and take-profit ###
 - If a sell condition is percentage-based ("value_type": "percent"):
@@ -99,14 +101,68 @@ Output:
 }}
 
 Please return a JSON object containing:
-- "ticker": canonical company names (expand abbreviations, drop country suffixes), as string or list.
+"ticker": canonical company names (expand abbreviations, drop country suffixes), as string or list.
+        Note:If the user mentions "Nifty 50" or "Nifty 50 shares only", expand it into a list of all current Nifty 50 constituent tickers (not the ETF like SETFNIF50.NS).
+        If the user mentions "Nifty Junior" or "Nifty Next 50", expand it into a list of all current Nifty Next 50 constituent tickers.
+        Never map Nifty 50 or Nifty Junior to a single ETF ticker. Always expand them to the underlying stocks.
 - "strategy": strategy name (e.g., RSI)
 - "buy_condition": dictionary of buy conditions
 - "sell_condition": dictionary of sell conditions
++- "additional_buy_condition": (optional) dictionary of conditions for averaging down or pyramiding
++- "entry_condition": (optional) dictionary if the entry must be gated by a crossover event before buys are valid
 - "start_date" and "end_date": calculate actual dates based on query and take today's date={today} as reference if relative.
 - For consecutive duration conditions ("3+ days", "consecutive days"):
     - include keys: indicator, comparison, value, duration_days, duration_type
 - Include "value_type": "percent" only for percent-based profit/loss conditions; default to absolute price otherwise.
+
+- If a buy, additional buy, or sell condition is percentage-based (value_type: "percent"):
+    - If it applies relative to the last executed trade, include "relative_to": "entry_price" in the JSON.
+    - Do NOT encode this as "<" or ">" comparisons directly.
+    - Example:
+      {{ "indicator": "Price", "operator": "take_profit", "value": 15, "value_type": "percent", "relative_to": "entry_price" }}
+      {{ "indicator": "Price", "operator": "stop_loss", "value": 5, "value_type": "percent", "relative_to": "entry_price" }}
+      {{ "indicator": "Price", "operator": "<", "value": 10, "value_type": "percent", "relative_to": "entry_price" }}  # for additional buys
+    - For averaging down or pyramiding (additional_buy_condition), if the user specifies a percentage drop (e.g., -10%, -20%) from the first buy price, always include "relative_to": "entry_price" in the structured query JSON.
+    - Always populate "relative_to": "entry_price" for any percent-based condition that depends on a previous trade entry price.  
+    - Only use absolute prices (no "relative_to") if the value is a direct price, not a percentage.
+
+    ######Stepwise Trend Rule#####:
+- If the user query mentions multiple EMAs or other moving averages in ordered relation (e.g., "20 EMA below 50 EMA and 50 EMA below 250 EMA") or asks for negative/positive crossovers:
+    - Include a "stepwise_trend" key in the structured JSON.
+    - The schema is:
+        "stepwise_trend_buy": {{
+            "indicators": ["EMA_20", "EMA_50", "EMA_250"],
+            "direction": "negative",
+            "action": "buy"
+        }},
+        "stepwise_trend_sell": {{
+            "indicators": ["EMA_20", "EMA_50", "EMA_250"],
+            "direction": "positive",
+            "action": "sell"
+        }}
+- Only include this key if such a trend-based instruction exists in the query.
+- Extract the EMA/MA numbers from the query text dynamically; do not hardcode EMA names.
+- The translator agent will use this array to generate chained crossover conditions.
+
+- If the user query mentions buying on a negative EMA/MA trend (e.g., 20 EMA < 50 EMA < 250 EMA) or similar stepwise trend:
+    - Always generate the sell condition as the exact reversal (positive trend):
+        - Example: sell_condition triggers when 20 EMA > 50 EMA > 250 EMA
+    - Do NOT use negative trend operators in sell_condition.
+    - Include this in the JSON either as 'stepwise_trend_sell' or in 'sell_condition' explicitly.
+    - Ensure your sell_condition reflects a trend reversal relative to the buy_condition.
+
+Important: Any sell condition based on a previous trend-based buy **must always represent a reversal**.  
+Do NOT reuse the same trend direction as the buy. For example, if buying occurs on a negative EMA crossover, the sell must occur on the corresponding positive EMA crossover.
+
+- If a trend-based EMA/MA condition triggers a buy (negative trend), the corresponding sell condition must be the reversal (positive trend) and should be included as 'stepwise_trend_sell'.
+    - Example:
+        "stepwise_trend_buy": {{ "indicators": ["EMA_20","EMA_50","EMA_250"], "direction":"negative", "action":"buy" }},
+        "stepwise_trend_sell": {{ "indicators": ["EMA_20","EMA_50","EMA_250"], "direction":"positive", "action":"sell" }}
+- Do not output negative trend operators in 'sell_condition' if the buy was on a negative trend.
+
+- Both keys follow the same schema with indicators, direction, and action.
+
+
 - "remarks": "If there is any additional context or instructions from the user, include them here. Do not include ticker information here."
 
 ⚠️ Important:
@@ -173,6 +229,8 @@ The user has provided the following backtest query: {user_query}
             }
         }
     
+    structured_query_dict.setdefault("additional_buy_condition", {})
+    structured_query_dict.setdefault("entry_condition", {})
     #happy path
     return {
         "thought": thoughts_text.strip(),

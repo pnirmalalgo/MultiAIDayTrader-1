@@ -28,7 +28,13 @@ OUTPUT:
 - date_filter: {apply: true/false, start_date, end_date}
 - buy_spec: {conditions: [ ... ] }  // fully expanded conditions; see CONDITION FORMAT
 - sell_spec: {conditions: [ ... ] } // fully expanded conditions
-- trade_management: {entry_tracking: true/false, stop_loss_pct: number|null, take_profit_pct: number|null, reentry_rule: string|null}
+"trade_management": {
+  "entry_tracking": true,
+  "stop_loss_pct": null,
+  "take_profit_pct": null,
+  "reentry_rule": "After any trade exit, do not re-enter until the relevant indicator exits the oversold/overbought zone and a fresh crossover occurs."
+}
+
 - duration_handling: {type: "consecutive"/"non-consecutive", days: int} or null
 - condition_code_snippets: { buy: [list of pandas conditions as strings], sell: [list of pandas conditions as strings] }
 - code_tasks: ordered list of granular, executable steps for CodeGen (must mention crossover detection, position checks, stop-loss/take-profit only if requested, portfolio updates, final forced-sell handling, plots)
@@ -90,6 +96,14 @@ Each condition is a dictionary. Use one of these operators depending on intent:
 4) Composite conditions:
    - If multiple atomic conditions must be combined with AND/OR, place them in the list and the code_tasks must explicitly state how to combine them (e.g., evaluate all conditions and apply logical AND).
 
+   - When strategy requires ordering of multiple series (e.g., Price > EMA_20 > EMA_50 > EMA_250), encode it as a strict chained inequality in sell_spec and condition_code_snippets:
+        - "sell_cond = (df['Price'] > df['EMA_20']) & (df['EMA_20'] > df['EMA_50']) & (df['EMA_50'] > df['EMA_250'])"
+        - Do NOT reduce ordering checks to partial conditions (like EMA_20 < EMA_50). Always include full ordering.
+
+    - Always use & and | operators consistently in pandas conditions. 
+        - Never mix & / | with 'and' / 'or'. 
+        - Wrap composite conditions in parentheses to avoid operator precedence issues.
+
 IMPORTANT: Never translate "moves back above" or "moves back below" into > or <. 
 Always encode them as crosses_above or crosses_below with shift(1). 
 
@@ -105,13 +119,15 @@ GOLDEN RULE: Every crossover-based strategy must include a re-entry safeguard.
 1. **Always encode crossovers explicitly** as `crosses_above` / `crosses_below`. Never convert "moves back above 30 after being below 30" to a plain `>` inequality. Use the CONDITION FORMAT for crossovers.
 
 2. **Trade management**
-   - Always include `entry_tracking: true`.
-   - Only include stop_loss_pct / take_profit_pct when the user explicitly requested them.
-   - If a safeguard/re-entry rule is present in the user's query or remarks, populate `trade_management.reentry_rule` with an explicit short instruction (e.g., "After a sell, do not re-enter until RSI first exits oversold/overbought and then forms a fresh crossover above 30").
-    - Always convert oversold/overbought thresholds (like RSI < 30 or RSI > 70) into crossover-based conditions.
+   - Always include "entry_tracking": true.
+    - If the user explicitly mentions stop-loss, set stop_loss_pct to the numeric value. Otherwise set it to null.
+    - If the user explicitly mentions take-profit (target), set take_profit_pct to the numeric value. Otherwise set it to null.
+    - Do NOT invent or assume default stop-loss/take-profit values. If not present in the query, these must be null.
+     - If the query does not mention stop-loss or take-profit, you MUST set both stop_loss_pct and take_profit_pct to null and you MUST NOT add them in sell_spec.conditions.
+    - Do NOT assume default values. Do NOT merge with strategy defaults unless explicitly stated.
+     - Always convert oversold/overbought thresholds (like RSI < 30 or RSI > 70) into crossover-based conditions.
     - Buy condition must be encoded as: RSI crosses above 30 after having been below 30.
     - Sell condition must be encoded as: RSI crosses below 70 after having been above 70.
-    - Re-entry safeguard is mandatory: after a trade is closed, set a state variable (e.g., waiting_for_reset = True).
     - New trades are only allowed when the indicator exits the prior zone and generates a fresh crossover.
     - Explicitly include this re-entry rule in the output JSON (under trade_management.reentry_rule) and in code_tasks.
 
@@ -119,6 +135,25 @@ Re-entry rule:
 - After a sell, do not open a new position immediately if RSI is still in the oversold/overbought zone.
 - A new buy is only valid when RSI crosses back above 30 after having been below 30.
 - A new sell (for short strategies) is only valid when RSI crosses back below 70 after having been above 70.
+“Always enforce re-entry safeguard. After a sell, set waiting_for_reset=True. Reset it only when the indicator exits the trigger zone (below oversold or above overbought), then allow fresh crossover buy.”
+
+--- STEPWISE TREND RULE ---
+- If structured_query includes a "stepwise_trend" key:
+    {
+        "indicators": ["EMA_20","EMA_50","EMA_250"],
+        "direction": "positive"|"negative",
+        "action": "buy"|"sell"
+    }
+- The translator must:
+    1. Generate a chained inequality condition between the indicators according to the direction:
+        - "negative": indicator[i] < indicator[i+1]
+        - "positive": indicator[i] > indicator[i+1]
+    2. Add this condition to the appropriate spec (buy_spec or sell_spec) as a dictionary with:
+        - "indicator": first indicator in the list
+        - "operator": "chained_trend"
+        - "formula": the pandas-style chained inequality string
+    3. Add the corresponding pandas-ready string in condition_code_snippets["buy"] or ["sell"]
+    4. Include a code_task describing evaluation of the stepwise trend before the trade
 
 Validation rule — indicators ↔ conditions (MANDATORY):
 - For every condition in buy_spec.conditions and sell_spec.conditions, the referenced "indicator" must appear in the top-level "indicators" list, and that indicators[] entry must contain an "output_column" that will be the DataFrame column name used in code (e.g. "RSI").
@@ -129,7 +164,6 @@ Validation rule — indicators ↔ conditions (MANDATORY):
 3. **Code tasks**
    - Provide a granular, ordered list of steps the CodeGen must implement (e.g., precompute indicators, implement crossover detection using shift(1), evaluate buy/sell only when position==0/1, use trades list for entry_price, update portfolio after trades, force-close final open position, save plots).
    - For every crossover step include the exact pandas-style hint: e.g., `cond = (df['RSI'] > 30) & (df['RSI'].shift(1) <= 30)` and mention `shift(1)` explicitly.
-   - For re-entry safeguard include an explicit state pattern and reset condition. Example step: "After a Sell, set `waiting_for_reset=True`; only set `waiting_for_reset=False` when RSI < 30 (for buy re-entry) OR RSI between 30 and 70 as appropriate; only allow new buys when `waiting_for_reset==False` and crossover condition occurs."
     - When multiple tickers are provided, the code must:
         1. Run the backtest for each ticker individually (generating trades, portfolio series, and plots).
         2. Collect key performance metrics (cumulative return, annualized return, volatility, max drawdown) for each ticker into a single results list.
@@ -173,7 +207,10 @@ Translator JSON (excerpt):
     "entry_tracking": true,
     "stop_loss_pct": 5,
     "take_profit_pct": 15,
-    "reentry_rule": "After any trade exit, do not re-enter until the relevant indicator exits the oversold/overbought zone and a fresh crossover occurs. Implement as a boolean state reset per crossover type."},
+    - "reentry_rule": must be adapted to the strategy:
+    • For oscillator-based strategies (RSI, Stoch, etc.), use oversold/overbought exit before re-entry.  
+    • For EMA/MAs or trend-based strategies, simply enforce: "After any trade exit, set waiting_for_reset=True. Do not allow new entry until a fresh valid crossover occurs."
+    },
   "code_tasks": [
     "Precompute RSI: df['RSI'] = ta.momentum.RSIIndicator(df['Close'], window=14).rsi()",
     "Define crossover detection: buy_cond = (df['RSI'] > 30) & (df['RSI'].shift(1) <= 30)",
@@ -184,6 +221,13 @@ Translator JSON (excerpt):
     "Use trades list for entry_price: entry_price = trades[-1][2]",
     "Update portfolio_value = cash + shares * current_price AFTER buy/sell logic for each day",
     "If last trade is a Buy, force-close at df['Close'].iloc[-1] and update portfolio_series.iloc[-1] = cash",
+        -  Evaluate additional_buy_condition if position > 0 (already holding). Buy additional shares if condition is True.
+        - Update cash, shares, and append a ('Buy', date, price) entry to trades.
+        - Portfolio value must be updated after any normal or additional buys and before sell evaluation.
+    "Evaluate stepwise trend (chained_trend) as defined in translator_instructions for buy/sell conditions",
+        "- Evaluate additional_buy_condition if position > 0 (already holding). Buy additional shares if condition is True.",
+        "- Update cash, shares, and append a ('Buy', date, price) entry to trades.",
+        "- Portfolio value must be updated after any normal or additional buys and before sell evaluation.",    
     "Plot strategy and portfolio as separate HTML files using trades list for markers."
   ],
   "plots": [
@@ -207,6 +251,13 @@ Translator JSON (excerpt):
 - Keep code_tasks granular and explicitly mention pandas `.shift(1)` crossover patterns and the re-entry state machine when a re-entry rule is present.
 - If the structured_query is ambiguous about crossovers vs inequality, prefer encoding as a crossover when language implies a *move back above/ below* threshold.
 - If the query explicitly requests no risk management, set stop_loss_pct and take_profit_pct to null and do not add those conditions.
+-If structured_query includes an "additional_buy_condition", always:
+        - Evaluate additional_buy_condition even when position > 0 (already holding shares).
+        - If True, buy as many shares as possible using available cash.
+        - Update trades list, cash, shares, and portfolio_series accordingly.
+        - Include explicit code_tasks for additional buy logic after normal buy logic in the daily loop.
+        - Ensure portfolio update reflects any additional buys before selling logic.
+
 For any generated strategy:
 - Always implement a re-entry safeguard using the following pattern.
 - Insert the actual buy signal logic into <buy_signal>.
@@ -214,8 +265,46 @@ For any generated strategy:
 - Always include `and not waiting_for_reset` in buy conditions.
 - After a sell, set waiting_for_reset = True.
 - Reset waiting_for_reset only when the relevant indicator fully exits the trigger zone.
+- Do not allow additional buys if waiting_for_reset==True.
+- Reset waiting_for_reset when indicator fully exits oversold/overbought zone.
 
 """
+
+# --- Validation: indicators <-> conditions consistency ---
+def validate_indicators(translator_json):
+    errors = []
+    indicators = {ind["output_column"] for ind in translator_json.get("indicators", [])}
+    indicators_to_plot = set(translator_json.get("indicators_to_plot", []))
+
+    # Collect all condition indicators
+    used_indicators = set()
+    for cond in translator_json.get("buy_spec", {}).get("conditions", []):
+        if "indicator" in cond:
+            used_indicators.add(cond["indicator"])
+        if "other_indicator" in cond:
+            used_indicators.add(cond["other_indicator"])
+    for cond in translator_json.get("sell_spec", {}).get("conditions", []):
+        if "indicator" in cond:
+            used_indicators.add(cond["indicator"])
+        if "other_indicator" in cond:
+            used_indicators.add(cond["other_indicator"])
+
+    for cond in translator_json.get("sell_spec", {}).get("conditions", []):
+        if cond.get("value_type") == "percent" and "relative_to" not in cond:
+            cond["relative_to"] = "entry_price"
+
+
+    # Rule 1: every used indicator must be declared
+    for ind in used_indicators:
+        if ind not in indicators:
+            errors.append(f"Condition uses {ind} but indicators[] missing it")
+
+    # Rule 2: every declared indicator must appear in indicators_to_plot
+    for ind in indicators:
+        if ind not in indicators_to_plot:
+            errors.append(f"Indicator {ind} declared but missing in indicators_to_plot")
+
+    return errors
 
 
 def translator_mcp(structured_query: dict) -> dict:
@@ -238,11 +327,85 @@ def translator_mcp(structured_query: dict) -> dict:
 
     try:
         translator_json = json.loads(content)
+
+        # --- Consolidated indicator validation ---
+        errors = validate_indicators(translator_json)
+
+        # Check buy_spec indicators
+        indicators_list = [ind["output_column"] for ind in translator_json.get("indicators", [])]
+        for cond in translator_json.get("buy_spec", {}).get("conditions", []):
+            if cond.get("indicator") not in indicators_list:
+                errors.append(f"buy_spec uses {cond.get('indicator')} but indicators[] missing it")
+        # Check sell_spec indicators
+        for cond in translator_json.get("sell_spec", {}).get("conditions", []):
+            if cond.get("indicator") not in indicators_list:
+                errors.append(f"sell_spec uses {cond.get('indicator')} but indicators[] missing it")
+        # Every indicator must be in indicators_to_plot
+        indicators_to_plot = translator_json.get("indicators_to_plot", [])
+        for ind in indicators_list:
+            if ind not in indicators_to_plot:
+                errors.append(f"indicator {ind} missing in indicators_to_plot")
+
+        if errors:
+            translator_json["errors"] = errors
+
+        # --- Ensure safety_checks ---
+        required_safety = [
+            "non-empty df",
+            "indicators present",
+            "buy/sell alternation enforced",
+            "portfolio_series length matches df.index",
+            "final forced-sell updates portfolio_series"
+        ]
+        if "safety_checks" not in translator_json or not isinstance(translator_json["safety_checks"], list):
+            translator_json["safety_checks"] = required_safety
+        else:
+            for check in required_safety:
+                if check not in translator_json["safety_checks"]:
+                    translator_json["safety_checks"].append(check)
+
+        # --- Ensure code_tasks exists ---
+        if "code_tasks" not in translator_json or not isinstance(translator_json["code_tasks"], list):
+            translator_json["code_tasks"] = []
+
+        # --- Re-entry safeguard tasks ---
+        reentry_tasks = [
+            "Initialize waiting_for_reset = False at the start of the loop",
+            "After a sell, set waiting_for_reset = True",
+            "Do not evaluate normal or additional buy while waiting_for_reset == True",
+            "Reset waiting_for_reset only when the relevant indicator fully exits the trigger zone",
+            "Include waiting_for_reset in all buy condition pandas expressions: 'and not waiting_for_reset'"
+        ]
+        # Prepend reentry tasks
+        translator_json["code_tasks"] = reentry_tasks + translator_json["code_tasks"]
+
+        # --- Additional buy condition tasks ---
+        if "additional_buy_condition" in structured_query:
+            translator_json["additional_buy_condition"] = structured_query["additional_buy_condition"]
+            additional_buy_steps = [
+                "Evaluate additional_buy_condition even when position > 0 (already holding).",
+                "If True, buy as many shares as possible using available cash.",
+                "Update trades list, cash, shares, and portfolio_series accordingly.",
+                "Ensure portfolio update reflects any additional buys before selling logic."
+            ]
+            # Append after normal buy logic
+            for step in additional_buy_steps:
+                if step not in translator_json["code_tasks"]:
+                    translator_json["code_tasks"].append(step)
+
+        # --- Stop-loss / take-profit handling ---
+        tm = translator_json.get("trade_management", {})
+        tm["entry_tracking"] = True
+        tm["stop_loss_pct"] = structured_query.get("stop_loss", None)
+        tm["take_profit_pct"] = structured_query.get("take_profit", None)
+        translator_json["trade_management"] = tm
+
     except json.JSONDecodeError:
         raise ValueError(f"Translator output not valid JSON: {content}")
 
-    # Ensure code_tasks exists and is always a list
+    # Final safeguard: ensure code_tasks exists
     if "code_tasks" not in translator_json or not isinstance(translator_json["code_tasks"], list):
         translator_json["code_tasks"] = []
 
     return translator_json
+
