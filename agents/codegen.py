@@ -106,13 +106,13 @@ GOLDEN RULES (you must respect these before anything else):
         3. Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
         4. If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
 
-- For any strategy, always interpret translator conditions (buy_spec, sell_spec, additional_buy thresholds) dynamically rather than hardcoding EMA or RSI levels.
+- For any strategy, always interpret translator conditions (buy_spec, sell_spec, additional_buy(only if additional buy is mentioned) thresholds) dynamically rather than hardcoding EMA or RSI levels.
 - All formulas or thresholds from translator instructions must be applied as-is using precomputed DataFrame columns.
 - Always guard entry_price usage:
       if position == 1 and entry_price is not None:
-          # stop-loss / take-profit / additional buy
+          # stop-loss / take-profit / additional buy(only if additional buy is mentioned)
         
-- All sell, stop-loss, take-profit, reentry, and additional buy checks must be inside:
+- All sell, stop-loss, take-profit, reentry, and additional buy(only if additional buy is mentioned) checks must be inside:
 
       if position == 1 and entry_price is not None:
           ...
@@ -145,7 +145,7 @@ MUST: Guard all entry_price arithmetic.
    - Do not produce two independent `if` blocks for buy and sell. If buy logic executes on a bar, sell logic must be skipped for that same bar.
 
    
-9. #### ADDITIONAL BUY RULES #####
+9. #### ADDITIONAL BUY RULES #####(only if additional buy is mentioned)
 - Additional Buy is only executed if position > 0, cash > 0, additional_buy_condition is True, and waiting_for_reset == False.
 - Do NOT merge normal buy and additional buy conditions into one if statement.
 - Always update cash, shares, and portfolio_series immediately after executing an additional buy.
@@ -159,7 +159,7 @@ For additional buys below entry price, implement sequential buys:
 - First additional buy triggers only after first threshold is hit; second triggers only after second threshold. 
 - Prevent multiple additional buys at the same threshold on the same trade.
 
-####Pseudo-code when additional_buy_condition is mentioned:#####
+####Pseudo-code when additional_buy_condition is mentioned:#####(only if additional buy is mentioned)
 additional_buy_done = False
 
 for i in range(len(df)):
@@ -259,23 +259,15 @@ for i in range(len(df)):
      - stop_loss: `current_price <= entry_price * (1 - stop_loss_pct/100)`.
      - take_profit: `current_price >= entry_price * (1 + take_profit_pct/100)`.
 
+- **Calculate all indicator series (RSI, SMA, etc.) before the loop**, do not recalc per iteration.
+
 - If operator is "chained_trend" or "stepwise_trend", use the precomputed formula string in `formula` directly in your loop.
     - Example: formula = "(df['EMA_20'] < df['EMA_50']) & (df['EMA_50'] < df['EMA_250'])"
     - Use this as part of `normal_buy_condition` or `sell_condition` inside the backtest loop.
 
 
-- If a condition in translator_instructions contains "relative_to": "entry_price", generate Python code that evaluates the threshold relative to the current entry_price of the open position.
-  - This calculation must occur inside the guard: if position == 1 and entry_price is not None.
-  - Do not precompute or vectorize this threshold outside the backtest loop.
-  - Use entry_price to calculate stop-loss, take-profit, or additional buy thresholds as needed.
-  - Example for an additional buy at -10%:  
-        threshold_price = entry_price * (1 - 0.10)
-        if current_price <= threshold_price:
-            # execute additional buy
-  - Repeat this logic for all percentage-based buy/additional buy/sell conditions referencing "relative_to": "entry_price".
-
-##### Additional Buy Handling####
-##### ADDITIONAL BUY RULES #####
+##### Additional Buy Handling#### (Only if additional buy is mentioned in input)
+##### ADDITIONAL BUY RULES ##### (Only if additional buy is mentioned in input)
 - Only execute Additional Buy if:
     1. position > 0
     2. cash > 0
@@ -310,7 +302,7 @@ for i in range(len(df)):
 - Always update cash, shares, portfolio_series, and trades immediately after each additional buy.
 - Ensure this is dynamic: thresholds and number of additional buys come from translator instructions.
 
-##### Additional Notes for Buy Logic ####
+##### Additional Notes for Buy Logic ####(Only if additional buy is mentioned in input)
 - Normal buy and additional buy are handled in separate conditional blocks.
 - Normal buy executes only if position == 0 and not waiting_for_reset and buy condition is met.
 - Additional buy executes only if position > 0, cash > 0, additional buy condition is met, and waiting_for_reset == False.
@@ -324,7 +316,18 @@ for i in range(len(df)):
 - Normal buy tuple: ("Buy", current_date, current_price, shares_bought)
 - Always update portfolio_series[i] immediately after executing any trade.
 
-- **Calculate all indicator series (RSI, SMA, etc.) before the loop**, do not recalc per iteration.
+- If a condition in translator_instructions contains "relative_to": "entry_price", generate Python code that evaluates the threshold relative to the current entry_price of the open position.
+  - This calculation must occur inside the guard: if position == 1 and entry_price is not None.
+  - Do not precompute or vectorize this threshold outside the backtest loop.
+  - Use entry_price to calculate stop-loss, take-profit, or additional buy(only if additional buy is mentioned) thresholds as needed.
+  - Example for an additional buy at -10%:  
+        threshold_price = entry_price * (1 - 0.10)
+        if current_price <= threshold_price:
+            # execute additional buy
+  - Repeat this logic for all percentage-based buy/additional buy(only if additional buy is mentioned)/sell conditions referencing "relative_to": "entry_price".
+
+
+
 
 4. **Position & Trade Tracking**
    - Track `position` (0 = no position, 1 = holding position), `entry_price`, `cash`, `shares`.
@@ -345,10 +348,13 @@ for i in range(len(df)):
 
 - Implement `waiting_for_reset` to prevent immediate re-entry after a sell.
     - After a sell, set `waiting_for_reset = True`.
-    - Reset `waiting_for_reset = False` **only** when indicators return to the negative trend (e.g., stepwise_trend for buy) and NOT during a sell signal.
+    - Reset `waiting_for_reset = False` only when the next valid re-entry condition occurs 
+      (e.g., golden cross for EMA strategies, or the translator-specified buy setup turning 
+      negative → positive again).
     - Do NOT reset waiting_for_reset inside sell logic.
     - Always include `and not waiting_for_reset` in buy condition.
-    - This ensures dynamic handling for any strategy and avoids premature re-entry.
+    - This ensures multiple trade cycles can occur: Sell → wait for reset → Buy again.
+
 
 ##### FORCE-CLOSE LAST OPEN TRADE #####
 - After the main loop finishes, check:
@@ -485,13 +491,13 @@ VERY IMPORTANT:
 
         ##### Portfolio Update Timing ####
         - **Do NOT update portfolio_series at the start of the loop.**
-        - Update portfolio_series **only after executing all trades** (normal buy, additional buy, or sell) for the current iteration.
+        - Update portfolio_series **only after executing all trades** (normal buy, additional buy(only if additional buy is mentioned), or sell) for the current iteration.
         - At the **end of each backtest loop iteration**, set:
             portfolio_series.iloc[i] = cash + shares * current_price
-        - This ensures that portfolio value on buy or additional buy days reflects the newly acquired shares.
+        - This ensures that portfolio value on buy or additional buy(only if additional buy is mentioned) days reflects the newly acquired shares.
         - Always update portfolio_series immediately after executing any trade:
             1. Normal Buy (position == 0)
-            2. Additional Buy (position > 0)
+            2. Additional Buy (position > 0)(only if additional buy is mentioned)
             3. Sell (position == 1)
         - Do not compute portfolio value twice per iteration; only compute **once after all trade logic**.
 
@@ -499,7 +505,7 @@ VERY IMPORTANT:
         - For each iteration of the backtest loop:
             1. Check Normal Buy (position == 0)
                 - If executed, immediately update cash, shares, portfolio_series[i]
-            2. Check Additional Buy (position > 0)
+            2. Check Additional Buy (position > 0)(only if additional buy is mentioned)
                 - If executed, immediately update cash, shares, portfolio_series[i]
             3. Check Sell (position == 1)
                 - If executed, immediately update cash, shares, portfolio_series[i]
