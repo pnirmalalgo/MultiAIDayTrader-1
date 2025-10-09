@@ -11,6 +11,29 @@ class OrchestratorAgent:
         self.thoughts = []
         self.logs = []
     
+    def classify_query_complexity_from_tags(self, features: list) -> str:
+        """
+        Use features extracted by interpreter to decide if advanced codegen is needed.
+        """
+        ADVANCED_TAGS = {
+            "supertrend",
+            "ema crossover",
+            "additional buying",
+            "multi-level buying",
+            "negative cross over",
+            "complex averaging",
+            "three exponential moving averages"
+        }
+
+        print("Classifying complexity from features:", features)
+
+        for f in features or []:
+            if f.lower() in ADVANCED_TAGS:
+                print("Classified as ADVANCED due to feature:", f)
+                return "advanced"
+
+        return "simple"
+
 
     def clean_cot_text(self, cot_text: str) -> str:
         """
@@ -106,6 +129,7 @@ class OrchestratorAgent:
             thoughts = result.get("thought") or result.get("thoughts", "")
             self.log_message("interpreter", thoughts)
 
+
         # ✅ Step 2: Resolve tickers
         try:
             self.log_command("call:ticker_lookup")
@@ -158,13 +182,26 @@ class OrchestratorAgent:
 
         # ✅ Step 5: CodeGen
         try:
-            self.log_command("call:codegen")
-            code_result = codegen_mcp({
+                # Decide which codegen agent to call
+            features = trans_result.get("features", [])
+            complexity = self.classify_query_complexity_from_tags(features)
+
+            if complexity == "advanced":
+                self.log_message("orchestrator", "Detected ADVANCED query. Routing to advanced_code_gen agent.")
+                from agents.advanced_codegen import advanced_codegen_mcp  # New agent
+                codegen_agent = advanced_codegen_mcp
+            else:
+                self.log_message("orchestrator", "Detected SIMPLE query. Using standard codegen_mcp.")
+                codegen_agent = codegen_mcp
+
+            # Call the selected codegen agent
+            code_result = codegen_agent({
                 "structured_query": structured_query,
                 "translated_query": enriched_query,
                 "instructions": translator_instructions,
                 "code_tasks": code_tasks
             })
+
 
             if code_result.get("action") != "CodeReady":
                 return {

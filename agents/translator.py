@@ -35,6 +35,28 @@ OUTPUT:
   "reentry_rule": "After any trade exit, do not re-enter until the relevant indicator exits the oversold/overbought zone and a fresh crossover occurs."
 }
 
+- "features": list of all features that are present in the user's query.  
+  To populate this list:
+  1. Include "additional buying" if `additional_buy_condition` is present and non-empty.
+  2. Include "entry gating" if `entry_condition` is present.
+  3. Include "multi-level buying" if stepwise trends are detected (e.g., "20 EMA < 50 EMA < 250 EMA").
+  4. Include "negative crossover" if any buy_condition or additional_buy_condition uses cross_below events.
+  5. Include "positive crossover" if any buy_condition or additional_buy_condition uses cross_above events.
+  6. Include "stop-loss" if any sell_condition specifies stop_loss or percentage-based loss.
+  7. Include "take-profit" if any sell_condition specifies take_profit or percentage-based gain.
+  8. Include any named technical indicators explicitly mentioned in buy/sell/additional conditions (e.g., RSI, MACD, SMA_50, EMA_233).
+- The goal is to make `features` a complete list of **all strategy elements and indicators that influence buy/sell decisions** in the query.
+
+# Additional buy handling:
+- If the user mentions buying additional shares while already holding (e.g., "buy again if price closes below EMA_233 but EMA_55 > EMA_233"):
+  - Populate translator_instructions["additional_buy_condition"] with a dictionary using the same operator format as normal crossovers:
+    {"indicator":"Price","operator":"<","other_indicator":"EMA_233"}
+  - Always include code_tasks to:
+      1. Evaluate additional_buy_condition after normal buy logic.
+      2. Buy maximum possible shares using available cash if condition is True.
+      3. Update trades list, cash, shares, and portfolio_series before sell evaluation.
+      4. Do not allow additional buys while waiting_for_reset==True.
+
 - duration_handling: {type: "consecutive"/"non-consecutive", days: int} or null
 - condition_code_snippets: { buy: [list of pandas conditions as strings], sell: [list of pandas conditions as strings] }
 - code_tasks: ordered list of granular, executable steps for CodeGen (must mention crossover detection, position checks, stop-loss/take-profit only if requested, portfolio updates, final forced-sell handling, plots)
@@ -53,7 +75,12 @@ OUTPUT:
 - required_files: list of filenames (use placeholders {ticker}, {curr_time_stamp})
 - plots: list of plot descriptors {type, y, axis: "primary"|"secondary", description}
 - safety_checks: list of assertions/tests to run
-- indicators_to_plot: list of indicator names (must include Close Price plus any indicator used in rules)
+- indicators_to_plot: list of indicator names. MUST always include "Close Price" plus every indicator referenced in buy_spec.conditions and sell_spec.conditions. 
+    - This list cannot be empty. 
+    - Automatically populate it from the top-level indicators[] entries. 
+    - If additional_buy_condition or stepwise_trend is present, include those indicators as well.
+    - Do NOT leave it blank or omit any indicator used in rules or plots.
+
 - remarks: string (echo any freeform instructions that do not fit other fields)
 
 --- CONDITION FORMAT (must use this canonical form) ---
@@ -73,6 +100,14 @@ Each condition is a dictionary. Use one of these operators depending on intent:
 
    For cross between two series (SMA50 crosses SMA200) use:
    {"indicator":"SMA_50", "operator":"crosses_above", "other_indicator":"SMA_200"}
+
+   # EMA trend-based crossovers:
+        - If the query mentions multiple EMAs (e.g., EMA_55, EMA_233), encode crossovers between EMAs as:
+        {"indicator":"EMA_55","operator":"crosses_above","other_indicator":"EMA_233"} 
+        or {"indicator":"EMA_55","operator":"crosses_below","other_indicator":"EMA_233"}.
+        - Do not convert these into numeric thresholds; always use cross_above / cross_below.
+        - Label these as positive_crossover or negative_crossover in the features list.
+
 
    - Apply the same “wait-for-reset” logic for any indicator-based strategy, not just RSI. 
    - CodeGen must create a boolean flag that blocks new trades until the indicator first leaves the threshold region and a new crossover occurs.
@@ -96,9 +131,10 @@ Each condition is a dictionary. Use one of these operators depending on intent:
 4) Composite conditions:
    - If multiple atomic conditions must be combined with AND/OR, place them in the list and the code_tasks must explicitly state how to combine them (e.g., evaluate all conditions and apply logical AND).
 
-   - When strategy requires ordering of multiple series (e.g., Price > EMA_20 > EMA_50 > EMA_250), encode it as a strict chained inequality in sell_spec and condition_code_snippets:
-        - "sell_cond = (df['Price'] > df['EMA_20']) & (df['EMA_20'] > df['EMA_50']) & (df['EMA_50'] > df['EMA_250'])"
-        - Do NOT reduce ordering checks to partial conditions (like EMA_20 < EMA_50). Always include full ordering.
+   - When strategy requires ordering of multiple series (e.g., Price > EMA_20 > EMA_50 > EMA_250), encode it as a strict chained inequality
+        - DO NOT apply full ordering if any atomic condition is an explicit crossover (crosses_above / crosses_below). 
+        - Only enforce chained inequalities when the query explicitly specifies multi-level stepwise trends. 
+        - Always wrap composite conditions in parentheses and use & / | consistently.
 
     - Always use & and | operators consistently in pandas conditions. 
         - Never mix & / | with 'and' / 'or'. 
@@ -110,11 +146,26 @@ Always encode them as crosses_above or crosses_below with shift(1).
 --- RULES (strict, follow exactly) ---
 
 GOLDEN RULE: Every crossover-based strategy must include a re-entry safeguard. 
+
 - After a sell, block re-entry until indicator exits the zone (e.g., RSI < 30). 
+# Re-entry safeguards for trend strategies:
+- For EMA or MA crossover strategies, after a sell:
+    1. Set waiting_for_reset = True
+    2. Reset waiting_for_reset only when trend reverses:
+       - For positive crossover buy: EMA_55 < EMA_233
+       - For negative crossover short/sell: EMA_55 > EMA_233
+- Do not allow additional buys while waiting_for_reset==True.
+
 - Only allow new entry on the next fresh crossover. 
 - Always generate condition_code_snippets from buy_spec and sell_spec.
 - These must be copy-paste ready pandas conditions using shift(1) for crossovers.
 - CodeGen will use these directly.
+
+IMPORTANT: Ensure that indicators_to_plot is always filled. 
+- Include all indicators used in buy_spec and sell_spec conditions.
+- Include all indicators listed under indicators[]. 
+- Always include "Close Price" even if not referenced in conditions.
+- If the strategy uses multiple indicators, list all of them explicitly.
 
 1. **Always encode crossovers explicitly** as `crosses_above` / `crosses_below`. Never convert "moves back above 30 after being below 30" to a plain `>` inequality. Use the CONDITION FORMAT for crossovers.
 
@@ -238,6 +289,36 @@ Translator JSON (excerpt):
   "safety_checks": ["non-empty df", "indicators present", "buy/sell alternation enforced", "portfolio_series length matches df.index", "final forced-sell updates portfolio_series"]
 }
 
+User text:
+"Buy when EMA_55 crosses above EMA_233; sell when EMA_55 crosses below EMA_233; buy additional shares if price closes below EMA_233 while EMA_55 > EMA_233."
+
+Translator JSON:
+{
+  "human_summary": "EMA crossover strategy with additional buy if price drops below EMA_233 but trend positive.",
+  "indicators": [
+    {"name":"EMA_55","class":"trend","params":{"window":55},"output_column":"EMA_55"},
+    {"name":"EMA_233","class":"trend","params":{"window":233},"output_column":"EMA_233"}
+  ],
+  "buy_spec": {
+    "conditions":[
+      {"indicator":"EMA_55","operator":"crosses_above","other_indicator":"EMA_233"}
+    ]
+  },
+  "sell_spec": {
+    "conditions":[
+      {"indicator":"EMA_55","operator":"crosses_below","other_indicator":"EMA_233"}
+    ]
+  },
+  "additional_buy_condition": {"indicator":"Price","operator":"<","other_indicator":"EMA_233"},
+  "trade_management": {
+    "entry_tracking": true,
+    "stop_loss_pct": null,
+    "take_profit_pct": null,
+    "reentry_rule": "After any trade exit, set waiting_for_reset=True; reset only when EMA_55 < EMA_233; do not allow additional buys while waiting_for_reset==True"
+  }
+}
+
+
 - Consistency Rules:
   - Every indicator used in buy_spec or sell_spec must also be listed in indicators[] with the correct output_column.
   - Every indicator in indicators[] must also appear in indicators_to_plot.
@@ -328,6 +409,23 @@ def translator_mcp(structured_query: dict) -> dict:
     try:
         translator_json = json.loads(content)
 
+        # --- Skip chained ordering for explicit crossovers ---
+        condition_code_snippets = {"buy": [], "sell": []}
+
+        for spec_key in ["buy_spec", "sell_spec"]:
+            for cond in translator_json.get(spec_key, {}).get("conditions", []):
+                if cond.get("operator") in ["crosses_above", "crosses_below"] and "other_indicator" in cond:
+                    if cond["operator"] == "crosses_above":
+                        snippet = f"(df['{cond['indicator']}'] > df['{cond['other_indicator']}']) & " \
+                                f"(df['{cond['indicator']}'].shift(1) <= df['{cond['other_indicator']}'].shift(1))"
+                    else:
+                        snippet = f"(df['{cond['indicator']}'] < df['{cond['other_indicator']}']) & " \
+                                f"(df['{cond['indicator']}'].shift(1) >= df['{cond['other_indicator']}'].shift(1))"
+                    condition_code_snippets[spec_key.replace("_spec","")].append(snippet)
+
+                translator_json["condition_code_snippets"] = condition_code_snippets
+
+
         # --- Consolidated indicator validation ---
         errors = validate_indicators(translator_json)
 
@@ -340,14 +438,24 @@ def translator_mcp(structured_query: dict) -> dict:
         for cond in translator_json.get("sell_spec", {}).get("conditions", []):
             if cond.get("indicator") not in indicators_list:
                 errors.append(f"sell_spec uses {cond.get('indicator')} but indicators[] missing it")
-        # Every indicator must be in indicators_to_plot
-        indicators_to_plot = translator_json.get("indicators_to_plot", [])
-        for ind in indicators_list:
-            if ind not in indicators_to_plot:
-                errors.append(f"indicator {ind} missing in indicators_to_plot")
 
-        if errors:
-            translator_json["errors"] = errors
+        # If additional_buy_condition exists, include its indicator(s) in indicators_to_plot
+        additional_buy = translator_json.get("additional_buy_condition", {})
+        if additional_buy:
+            for cond in additional_buy.get("conditions", []):
+                if "indicator" in cond and cond["indicator"] not in indicators_list:
+                    indicators_list.append(cond["indicator"])
+                if "other_indicator" in cond and cond["other_indicator"] not in indicators_list:
+                    indicators_list.append(cond["other_indicator"])
+
+                # Every indicator must be in indicators_to_plot
+                indicators_to_plot = translator_json.get("indicators_to_plot", [])
+                for ind in indicators_list:
+                    if ind not in indicators_to_plot:
+                        errors.append(f"indicator {ind} missing in indicators_to_plot")
+
+                if errors:
+                    translator_json["errors"] = errors
 
         # --- Ensure safety_checks ---
         required_safety = [
@@ -379,15 +487,60 @@ def translator_mcp(structured_query: dict) -> dict:
         # Prepend reentry tasks
         translator_json["code_tasks"] = reentry_tasks + translator_json["code_tasks"]
 
+        # --- Handle additional_buy_condition if present ---
+        additional_buy = structured_query["structured_query"].get("additional_buy_condition")
+        print(structured_query)
+        print(additional_buy)
+        if additional_buy:
+            translator_json["additional_buy_condition"] = additional_buy
+
+            # Update features
+            features = set(translator_json.get("features", []))
+            features.add("additional buying")
+            translator_json["features"] = list(features)
+
+            # Update indicators_to_plot
+            indicators_to_plot = set(translator_json.get("indicators_to_plot", []))
+            for key in ["indicator", "other_indicator"]:
+                if key in additional_buy:
+                    indicators_to_plot.add(additional_buy[key])
+            translator_json["indicators_to_plot"] = list(indicators_to_plot)
+
+            # Append code_tasks for additional buy
+            additional_buy_tasks = [
+                "Evaluate additional_buy_condition even when position > 0 (already holding).",
+                "If True, buy as many shares as possible using available cash.",
+                "Update trades list, cash, shares, and portfolio_series accordingly.",
+                "Ensure portfolio update reflects any additional buys before selling logic."
+            ]
+            translator_json["code_tasks"].extend(additional_buy_tasks)
+        
+        for cond in translator_json.get("buy_spec", {}).get("conditions", []):
+            if cond.get("operator") in ["crosses_above","crosses_below"]:
+                indicator_a = cond["indicator"]
+                indicator_b = cond.get("other_indicator")
+                if indicator_b:
+                    reentry_rule_generic = f"Reset waiting_for_reset only when {indicator_a} crosses opposite direction relative to {indicator_b}"
+                    reentry_tasks.append(reentry_rule_generic)
+
+            if "threshold" in cond:
+                reentry_rule_generic = f"Reset waiting_for_reset only when {cond['indicator']} exits the trigger zone"
+                reentry_tasks.append(reentry_rule_generic)
+
+
         # --- Additional buy condition tasks ---
-        if "additional_buy_condition" in structured_query:
+        
+        if "additional_buy_condition" in structured_query and structured_query["additional_buy_condition"]:
             translator_json["additional_buy_condition"] = structured_query["additional_buy_condition"]
+
             additional_buy_steps = [
                 "Evaluate additional_buy_condition even when position > 0 (already holding).",
                 "If True, buy as many shares as possible using available cash.",
                 "Update trades list, cash, shares, and portfolio_series accordingly.",
                 "Ensure portfolio update reflects any additional buys before selling logic."
             ]
+            translator_json["code_tasks"].extend(additional_buy_steps)
+
             # Append after normal buy logic
             for step in additional_buy_steps:
                 if step not in translator_json["code_tasks"]:
@@ -396,8 +549,8 @@ def translator_mcp(structured_query: dict) -> dict:
         # --- Stop-loss / take-profit handling ---
         tm = translator_json.get("trade_management", {})
         tm["entry_tracking"] = True
-        tm["stop_loss_pct"] = structured_query.get("stop_loss", None)
-        tm["take_profit_pct"] = structured_query.get("take_profit", None)
+        tm.setdefault("stop_loss_pct", structured_query.get("stop_loss", None))
+        tm.setdefault("take_profit_pct", structured_query.get("take_profit", None))
         translator_json["trade_management"] = tm
 
     except json.JSONDecodeError:

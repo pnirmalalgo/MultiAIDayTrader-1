@@ -102,6 +102,7 @@ def poll_task_status(task_id):
         delay = 2
         files = []
         py_content = ""
+        py_file = None  # ✅ keep track of script file
 
         for attempt in range(max_attempts):
             resp = requests.get(f"{API_TASK_STATUS_URL}/{task_id}")
@@ -112,6 +113,7 @@ def poll_task_status(task_id):
 
             if status == "SUCCESS":
                 files = status_data.get("files", [])
+                py_file = status_data.get("file")  # ✅ pull script file from API
                 if "trading_results.html" not in files:
                     files.append("trading_results.html")
                 break
@@ -123,8 +125,9 @@ def poll_task_status(task_id):
         if not files and not output_log:
             return "", "Task completed but no files found.", ""
 
-        # Extract generated .py file from output logs if not in files
-        py_file = next((f for f in files if f.endswith(".py")), None)
+        # ✅ If API didn’t return it, fallback to old logic
+        if not py_file:
+            py_file = next((f for f in files if f.endswith(".py")), None)
         if not py_file:
             match = re.search(r'(generated_scripts/.*?\.py):', output_log)
             py_file = match.group(1) if match else None
@@ -142,14 +145,14 @@ def poll_task_status(task_id):
             iframe_html += f"""
                 <div style="margin-bottom: 20px;">
                     <p><strong>{file}</strong></p>
-                    <iframe src="http://localhost:8000/plots/{file}" width="100%" height="500px"
+                    <iframe src="http://localhost:8000/plots/{file}?t={int(time.time())}" 
+                        width="100%" height="500px"
                         style="border: 1px solid #ccc; border-radius: 8px;"></iframe>
                 </div>
             """
         return iframe_html, "Task completed successfully.", py_content
     except Exception as e:
         return "", f"Exception polling task status: {str(e)}", ""
-
 # -----------------------------------------
 # When user confirms interpretation
 # -----------------------------------------
@@ -239,7 +242,7 @@ with gr.Blocks() as demo:
     original_cot_state = gr.State()
 
     with gr.Row():
-        status_output = gr.Textbox(label="Status / Task ID")
+        status_output = gr.Textbox(label="Status / Task ID", lines=5, interactive=False)
         code_output = gr.Textbox(label="Generated Python Code", lines=20, interactive=False, visible=False)
 
     iframe_display = gr.HTML(label="Generated Plots")

@@ -151,6 +151,7 @@ async def task_status(task_id: str):
             "files": files,
             "logs": logs,
             "output": output,
+            "file": res.get("file"),
         }
 
     elif state == "FAILURE":
