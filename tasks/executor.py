@@ -30,6 +30,9 @@ def run_python_code(self, code: str):
       1) Look for a printed debug line: Generated files: [...]
       2) Detect new .html files created between before/after snapshots of PLOTS_DIR.
     """
+
+    logging.info("Received code of length %d", len(code))
+    
     filename = os.path.join(SCRIPT_DIR, f"code_{uuid.uuid4().hex}.py")
     logging.info(f"Saved code to {filename} (length={len(code)})")
     

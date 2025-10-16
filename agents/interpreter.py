@@ -102,9 +102,21 @@ Output:
 
 Please return a JSON object containing:
 "ticker": canonical company names (expand abbreviations, drop country suffixes), as string or list.
-        Note:If the user mentions "Nifty 50" or "Nifty 50 shares only", expand it into a list of all current Nifty 50 constituent tickers (not the ETF like SETFNIF50.NS).
-        If the user mentions "Nifty Junior" or "Nifty Next 50", expand it into a list of all current Nifty Next 50 constituent tickers.
-        Never map Nifty 50 or Nifty Junior to a single ETF ticker. Always expand them to the underlying stocks.
+    Please handle tickers as follows:
+
+        - If the user query mentions an index or group of stocks, do NOT list individual tickers or ETFs. Instead, use one of these placeholders:
+
+            - "NIFTY_50_LIST" → all current Nifty 50 constituent stocks
+            - "NIFTY_NEXT_50_LIST" → all current Nifty Next 50 constituent stocks
+            - "NIFTY_MIDCAP_100_LIST" → all current Nifty Midcap 100 constituent stocks
+            - "NIFTY_SMALLCAP_250_LIST" → all current Nifty Smallcap 250 constituent stocks
+            - "NIFTY_500_LIST" → all current Nifty 500 constituent stocks
+            - "NIFTY_TOTAL_LIST" → all current Nifty constituent stocks
+
+        - Never output ETF tickers (e.g., SETFNIF50.NS) or literal text like "Nifty 50 constituent stocks".
+        - Only return the appropriate placeholder string in the "ticker" field of the JSON.
+        - Later, the translator agent or Python code will replace these placeholders with actual tickers from CSV files.
+
 - "strategy": strategy name (e.g., RSI)
 - "buy_condition": dictionary of buy conditions
 - "sell_condition": dictionary of sell conditions

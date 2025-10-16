@@ -1,4 +1,6 @@
 yfinance
+numpy_financial
+pyxirr
 ta
 gradio
 celery

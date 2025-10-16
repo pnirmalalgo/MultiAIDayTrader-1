@@ -30,16 +30,18 @@ def codegen_mcp(payload: dict) -> dict:
     #structured_query = payload.get("structured_query", {})
     # find translator output in common places
     translated = {}
-    # priority: explicit translated_query -> instructions -> top-level translated/instructions
-    if isinstance(payload.get("translated_query"), dict) and payload.get("translated_query"):
-        translated = payload["translated_query"]
-    elif isinstance(payload.get("instructions"), dict) and payload.get("instructions"):
+    if isinstance(payload.get("instructions"), dict) and payload["instructions"]:
+        print("Using translator_instructions")
         translated = payload["instructions"]
-    elif isinstance(payload.get("translated"), dict) and payload.get("translated"):
+    elif isinstance(payload.get("translated_query"), dict) and payload["translated_query"]:
+        print("Using translated_query")
+        translated = payload["translated_query"]
+    elif isinstance(payload.get("translated"), dict) and payload["translated"]:
+        print("Using translated")
         translated = payload["translated"]
     else:
-        # last resort: use structured_query if it already contains instruction-like keys
-        translated = payload.get("translated_query") or payload.get("instructions") or payload.get("structured_query") or {}
+        # last resort
+        translated = payload.get("structured_query", {}) or {}
 
     structured_query = payload.get("structured_query", {}) or {}
     trade_management = translated.get("trade_management", {})

@@ -129,6 +129,21 @@ class OrchestratorAgent:
             thoughts = result.get("thought") or result.get("thoughts", "")
             self.log_message("interpreter", thoughts)
 
+        placeholder_to_csv = {
+            "NIFTY_50_LIST": "/tickers/NIFTY_50.csv",
+            "NIFTY_NEXT_50_LIST": "/tickers/NIFTY_NEXT_50.csv",
+            "NIFTY_MIDCAP_100_LIST": "/tickers/NIFTY_MIDCAP_100.csv",
+            "NIFTY_SMALLCAP_250_LIST": "/tickers/NIFTY_SMALLCAP_250.csv",
+            "NIFTY_500_LIST": "/tickers/NIFTY_500.csv"
+        }
+
+        ticker_value = structured_query.get("ticker")
+
+        if isinstance(ticker_value, str) and ticker_value in placeholder_to_csv:
+            structured_query["ticker_csv_path"] = placeholder_to_csv[ticker_value]
+        else:
+            structured_query["ticker_csv_path"] = ""
+
 
         # ✅ Step 2: Resolve tickers
         try:

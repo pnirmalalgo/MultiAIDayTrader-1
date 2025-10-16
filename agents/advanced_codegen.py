@@ -97,6 +97,19 @@ def advanced_codegen_mcp(payload: dict) -> dict:
   - Plot EMA indicators (e.g., EMA 55, EMA 233) on a secondary y-axis.
   - Use `make_subplots(specs=[[{"secondary_y": True}]])`.
   - Mark all buy/additional-buy/sell events aligned with their date indices.
+
+  # Inside advanced_codegen_mcp, in the prompt-building section:
+
+# -------- TRADE RECORDING --------
+- Maintain a DataFrame `trades` with columns: 'Action', 'Date', 'Price', 'Shares'.
+- Every trade, including normal buys, additional buys (AddBuy), and sells, must record the number of shares transacted in the 'Shares' column.
+- Example:
+    trades.append(('Buy', df.index[i], current_price, num_shares))
+    trades.append(('AddBuy', df.index[i], current_price, extra_shares))
+    trades.append(('Sell', df.index[i], current_price, shares_sold))
+- Ensure no action is missing the 'Shares' value; otherwise, DataFrame creation will fail.
+
+
 """
 )
 
@@ -139,7 +152,18 @@ if df['additional_buy_signal'].iloc[i]:
 """
 
 )
-
+        prompt_lines.append(
+"""
+# Example snippet for additional buy:
+if df['additional_buy_signal'].iloc[i]:
+    capital += 100000  # inject new capital
+    extra_shares = 100000 // current_price
+    if extra_shares > 0:
+        shares += extra_shares
+        capital -= extra_shares * current_price
+        trades.append(('AddBuy', df.index[i], current_price, extra_shares))
+"""
+)
     # Build final prompt body
     final_prompt = "\n".join(prompt_lines)
 

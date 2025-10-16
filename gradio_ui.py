@@ -143,11 +143,19 @@ def poll_task_status(task_id):
         iframe_html = ""
         for file in files:
             iframe_html += f"""
-                <div style="margin-bottom: 20px;">
-                    <p><strong>{file}</strong></p>
-                    <iframe src="http://localhost:8000/plots/{file}?t={int(time.time())}" 
+                <div style="margin-bottom: 20px; border: 1px solid #ccc; border-radius: 8px; padding: 8px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <p style="margin: 0;"><strong>{file}</strong></p>
+                        <button onclick="document.getElementById('iframe_{file}').src='http://localhost:8000/plots/{file}?t=' + Date.now()" 
+                                style="background: #f0f0f0; border: none; padding: 4px 8px; border-radius: 6px; cursor: pointer;">
+                            🔄 Refresh
+                        </button>
+                    </div>
+                    <iframe id="iframe_{file}" 
+                        src="http://localhost:8000/plots/{file}?t={int(time.time())}" 
                         width="100%" height="500px"
-                        style="border: 1px solid #ccc; border-radius: 8px;"></iframe>
+                        style="border: none; border-radius: 8px; margin-top: 8px;">
+                    </iframe>
                 </div>
             """
         return iframe_html, "Task completed successfully.", py_content

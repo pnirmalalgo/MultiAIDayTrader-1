@@ -50,7 +50,7 @@ OUTPUT:
 # Additional buy handling:
 - If the user mentions buying additional shares while already holding (e.g., "buy again if price closes below EMA_233 but EMA_55 > EMA_233"):
   - Populate translator_instructions["additional_buy_condition"] with a dictionary using the same operator format as normal crossovers:
-    {"indicator":"Price","operator":"<","other_indicator":"EMA_233"}
+    {"indicator":"Close","operator":"<","other_indicator":"EMA_233"}
   - Always include code_tasks to:
       1. Evaluate additional_buy_condition after normal buy logic.
       2. Buy maximum possible shares using available cash if condition is True.
@@ -115,7 +115,7 @@ Each condition is a dictionary. Use one of these operators depending on intent:
 
 2) Inequality / price formulas (for stop-loss / take-profit):
    {
-     "indicator": "Price",
+     "indicator": "Close",
      "operator": "<=" | ">=" | "<" | ">",
      "formula": "entry_price * (1 - 0.05)"   # string formula allowed; preserve entry_price variable
    }
@@ -131,7 +131,7 @@ Each condition is a dictionary. Use one of these operators depending on intent:
 4) Composite conditions:
    - If multiple atomic conditions must be combined with AND/OR, place them in the list and the code_tasks must explicitly state how to combine them (e.g., evaluate all conditions and apply logical AND).
 
-   - When strategy requires ordering of multiple series (e.g., Price > EMA_20 > EMA_50 > EMA_250), encode it as a strict chained inequality
+   - When strategy requires ordering of multiple series (e.g., Close > EMA_20 > EMA_50 > EMA_250), encode it as a strict chained inequality
         - DO NOT apply full ordering if any atomic condition is an explicit crossover (crosses_above / crosses_below). 
         - Only enforce chained inequalities when the query explicitly specifies multi-level stepwise trends. 
         - Always wrap composite conditions in parentheses and use & / | consistently.
@@ -250,8 +250,8 @@ Translator JSON (excerpt):
   "sell_spec": {
     "conditions": [
       {"indicator":"RSI", "operator":">", "threshold":70},
-      {"indicator":"Price", "operator":"<=", "formula":"entry_price * (1 - 0.05)"},
-      {"indicator":"Price", "operator":">=", "formula":"entry_price * (1 + 0.15)"}
+      {"indicator":"Close", "operator":"<=", "formula":"entry_price * (1 - 0.05)"},
+      {"indicator":"Close", "operator":">=", "formula":"entry_price * (1 + 0.15)"}
     ]
   },
   "trade_management": {
@@ -309,7 +309,7 @@ Translator JSON:
       {"indicator":"EMA_55","operator":"crosses_below","other_indicator":"EMA_233"}
     ]
   },
-  "additional_buy_condition": {"indicator":"Price","operator":"<","other_indicator":"EMA_233"},
+  "additional_buy_condition": {"indicator":"Close","operator":"<","other_indicator":"EMA_233"},
   "trade_management": {
     "entry_tracking": true,
     "stop_loss_pct": null,
