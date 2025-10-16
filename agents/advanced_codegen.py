@@ -69,29 +69,34 @@ def advanced_codegen_mcp(payload: dict) -> dict:
 
     prompt_lines.append(
 """
-- When executing any normal buy (derived from translator `buy_spec` or `buy_signal`), use **only 80% of available cash**. Keep the remaining 20% as reserved cash for additional buy opportunities.
-- Execute any additional buys (derived from translator `additional_buy_condition`, `averaging`, or `pyramiding`) using the reserved cash only.
-- Remove any restriction of “one action per day”; allow additional buys to occur on the same day as normal buys if conditions are met and cash is available.
-- Always check for available cash before executing any additional buy.
-- Update portfolio value immediately after any buy or sell action.
-- Plot all buy, additional buy, and sell signals distinctly on the strategy chart.
-- Do NOT hardcode buy conditions — use whatever logic is provided in the translator instructions or structured query.
-- Follow the 80/20 cash allocation rule for every strategy, regardless of the specific indicators or conditions used.
-- Ensure all buy actions update the portfolio value immediately, and plot all buy signals (normal and additional) on the strategy plot.
-- Remove the `executed_action is None` gate. Allow multiple additional buys per day if conditions and funds permit.
-- Always check for available cash before executing an additional buy.
-- Update portfolio value immediately after any buy or sell action.
-- Plot all buy, additional buy, and sell signals on the strategy chart with distinct markers.
+- Start with an initial capital of 100,000 units (base capital).
+- When executing a **normal buy**, invest using available capital.
+- Whenever an **additional buy condition** (averaging or pyramiding rule) triggers:
+  - Inject an **additional 100,000 units of capital** into the portfolio (treat this as new cash inflow).
+  - Execute an additional buy immediately using that new capital.
+  - Record the new capital injection as a negative cash flow (buy event) for XIRR computation.
+- Maintain a record of all trade cash flows:
+  - Buy (including additional buys) → Negative cash flow (outflow)
+  - Sell → Positive cash flow (inflow)
+- At the end of the strategy, compute total performance using **XIRR** (Extended Internal Rate of Return).
+  - Use `numpy_financial.xirr(cash_flows, dates)` or equivalent.
+  - Report both final portfolio value and XIRR (%).
+- Do NOT limit to one action per day; allow multiple additional buys if funds exist.
+- Always update portfolio value immediately after every trade.
+- Ensure all buys and sells update the trade log and portfolio equity series.
+- Plot markers distinctly:
+  - Buy → Green upward triangle
+  - Additional Buy → Light green diamond
+  - Sell → Red downward triangle
+- Do NOT hardcode conditions; use those from the translator or structured_query.
+- Follow all translator `code_tasks` exactly in order.
 - Implement reentry/reset logic according to `trade_management.reentry_rule`.
-- Follow all translator `code_tasks` in order.
 
-- When plotting the strategy, show the stock price on the primary y-axis.  
-- Plot EMA indicators (eg. EMA 55, EMA 233) on a secondary y-axis.  
-- Use `make_subplots(specs=[[{"secondary_y": True}]])` to enable the secondary axis.  
-- For each trace, specify `secondary_y=True` for EMA lines and `secondary_y=False` for price.  
-- Do NOT put `secondary_y` inside `update_layout` — it is invalid there.  
-- Plot buy, additional buy, and sell markers on the same figure, aligned with their corresponding price points.  
-
+- When plotting:
+  - Show price on the primary y-axis.
+  - Plot EMA indicators (e.g., EMA 55, EMA 233) on a secondary y-axis.
+  - Use `make_subplots(specs=[[{"secondary_y": True}]])`.
+  - Mark all buy/additional-buy/sell events aligned with their date indices.
 """
 )
 
@@ -121,34 +126,19 @@ def advanced_codegen_mcp(payload: dict) -> dict:
                 code_tasks.append(s)
 
         # Provide an explicit code example — copy-paste ready template for additional buying
-        prompt_lines.append("\n# ADDITIONAL BUY HANDLING - TEMPLATE (copy/paste-ready):\n")
-        prompt_lines.append("""
-# Example: create additional_buy_signal (adjust names to match translator's indicator names)
-# If condition is a crossover between Price and EMA_233 (crosses_below):
-df['additional_buy_signal'] = (
-    (df['Price'] < df['EMA_233']) &
-    (df['Price'].shift(1) >= df['EMA_233'].shift(1))
-)
-# If condition is a simple inequality (Price < EMA_233):
-# df['additional_buy_signal'] = (df['Price'] < df['EMA_233'])
-
-# In the backtest loop (mutually-exclusive actions and executed_action guard):
-executed_action = None   # reset at top of bar
-if position == 0 and not waiting_for_reset and buy_signal.iloc[i]:
-    # normal entry
-    executed_action = 'buy'
-    # buy logic...
-elif position > 0 and not waiting_for_reset and executed_action is None and df['additional_buy_signal'].iloc[i]:
-    # additional buy (pyramiding / averaging)
-    extra_shares = cash // current_price
+        prompt_lines.append("\n# ADDITIONAL BUY HANDLING - TEMPLATE:\n")
+        prompt_lines.append(            """
+# Example snippet for reference:
+if df['additional_buy_signal'].iloc[i]:
+    capital += 100000  # inject new capital
+    extra_shares = 100000 // current_price
     if extra_shares > 0:
         shares += extra_shares
-        cash -= extra_shares * current_price
-        trades.append(('AddBuy', df.index[i], current_price))
-        executed_action = 'addbuy'
-# After normal/add buy logic update portfolio_series[i] = cash + shares * current_price
-# Then evaluate sell logic (only if position == 1 and entry_price is not None)
-        """)
+        capital -= extra_shares * current_price
+        trades.append(('AddBuy', df.index[i], current_price, -100000))
+"""
+
+)
 
     # Build final prompt body
     final_prompt = "\n".join(prompt_lines)
