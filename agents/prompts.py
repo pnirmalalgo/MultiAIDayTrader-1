@@ -468,6 +468,238 @@ VERY IMPORTANT:
        3. Ensure the filenames match the naming conventions above and any `required_files` provided by the translator instructions; if translator provides `required_files`, use those exact filenames (substituting {ticker} and {curr_time_stamp} accordingly) and add them to `generated_files`.
        4. If the code creates additional supporting files (logs, CSVs), add them to `generated_files` as well.
 
+--- PORTFOLIO-LEVEL REQUIREMENTS (NEW) ---
+
+**Multi-Ticker Portfolio Construction:**
+- Each ticker starts with an independent allocation of 10,000 INR.
+- Total initial portfolio = 10,000 × number of tickers.
+- Track each ticker's portfolio independently during backtest.
+- After all tickers are processed, aggregate metrics at portfolio level.
+
+**Portfolio-Level Metrics (MUST CALCULATE):**
+1. **Annualized Return**: ((final_portfolio_value / initial_portfolio_value) ^ (252 / n_days) - 1) × 100
+2. **Volatility**: std(daily_portfolio_returns) × sqrt(252) × 100
+3. **Max Drawdown**: max(1 - portfolio_series / portfolio_series.cummax()) × 100
+4. **Sharpe Ratio**: (annualized_return - risk_free_rate) / volatility
+   - Use risk_free_rate = 6.5% (India's 10-year G-Sec rate) or 0 if not specified
+5. **Gain-to-Loss Ratio**: sum(positive_returns) / abs(sum(negative_returns))
+   - Only include days where trades occurred or position changed
+
+**Portfolio Aggregation Steps:**
+1. After processing all tickers:
+   - Combine all per-ticker portfolio_series into a single portfolio_series (sum across tickers per date)
+   - Ensure all ticker DataFrames share the same date index (use pd.concat with axis=1, fill_method='ffill')
+2. Calculate daily portfolio returns: portfolio_series.pct_change().dropna()
+3. Compute all portfolio-level metrics using the aggregated portfolio_series
+4. Save to: `portfolio_summary_{timestamp}.html`
+
+**Portfolio Summary HTML Structure:**
+- Section 1: Overall Portfolio Metrics (table with metrics above)
+- Section 2: Per-Ticker Contribution (table showing each ticker's final value, return %)
+- Section 3: Portfolio equity curve plot (aggregated across all tickers)
+
+--- TRADE-LEVEL ACCURACY (NEW) ---
+
+**Trade Accuracy Calculation:**
+For each ticker, after all trades are complete:
+1. Classify each closed trade (Buy → Sell pair) as Win or Loss:
+   - Win: sell_price > buy_price
+   - Loss: sell_price <= buy_price
+2. Calculate:
+   - **Total Trades**: count of closed trades
+   - **Winning Trades**: count where sell_price > buy_price
+   - **Losing Trades**: count where sell_price <= buy_price
+   - **Win Rate**: (winning_trades / total_trades) × 100
+   - **Average Win**: mean(sell_price - buy_price) for winning trades
+   - **Average Loss**: mean(sell_price - buy_price) for losing trades (will be negative)
+   - **Profit Factor**: abs(sum(wins)) / abs(sum(losses))
+
+**Trade Analysis HTML Structure:**
+Create `trade_analysis_{timestamp}.html` with:
+- Table with columns: Ticker, Total Trades, Winning Trades, Losing Trades, Win Rate %, Avg Win, Avg Loss, Profit Factor
+- One row per ticker
+- Summary row at bottom (aggregate across all tickers)
+
+**Implementation Requirements:**
+```python
+# After processing each ticker
+def analyze_trades(trades_list):
+    closed_trades = []
+    for i in range(0, len(trades_list), 2):
+        if i+1 < len(trades_list) and trades_list[i][0] == "Buy" and trades_list[i+1][0] == "Sell":
+            buy_price = trades_list[i][2]
+            sell_price = trades_list[i+1][2]
+            pnl = sell_price - buy_price
+            closed_trades.append({
+                'buy_date': trades_list[i][1],
+                'sell_date': trades_list[i+1][1],
+                'buy_price': buy_price,
+                'sell_price': sell_price,
+                'pnl': pnl,
+                'return_pct': (pnl / buy_price) * 100,
+                'win': pnl > 0
+            })
+    
+    if not closed_trades:
+        return {
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'win_rate': 0,
+            'avg_win': 0,
+            'avg_loss': 0,
+            
+        }
+    
+    wins = [t['pnl'] for t in closed_trades if t['win']]
+    losses = [t['pnl'] for t in closed_trades if not t['win']]
+    
+    return {
+        'total_trades': len(closed_trades),
+        'winning_trades': len(wins),
+        'losing_trades': len(losses),
+        'win_rate': (len(wins) / len(closed_trades)) * 100 if closed_trades else 0,
+        'avg_win': sum(wins) / len(wins) if wins else 0,
+        'avg_loss': sum(losses) / len(losses) if losses else 0,
+        
+    }
+
+# Store per ticker
+trade_metrics_per_ticker.append({
+    'Ticker': ticker,
+    **analyze_trades(trades)
+})
+```
+
+**Updated File Generation:**
+The code must generate these files:
+1. `{ticker}_strategy_plot_{timestamp}.html` (per ticker, existing)
+2. `{ticker}_portfolio_value_{timestamp}.html` (per ticker, existing)
+3. `trading_results.html` (per-ticker performance, existing)
+4. `portfolio_summary_{timestamp}.html` (NEW - portfolio-level metrics)
+5. `trade_analysis_{timestamp}.html` (NEW - trade accuracy per ticker)
+6. `portfolio_equity_curve_{timestamp}.html` (NEW - aggregated portfolio plot)
+
+Add all new files to `generated_files` list.
+
+--- UPDATED AGGREGATION WORKFLOW ---
+```python
+# Global lists
+all_metrics = []
+all_trade_analysis = []
+all_portfolio_series = {}  # {ticker: portfolio_series}
+all_generated_files = []
+
+# Process each ticker
+for ticker in tickers:
+    # ... existing backtest logic ...
+    
+    # Store portfolio series for aggregation
+    all_portfolio_series[ticker] = portfolio_series
+    
+    # Calculate trade metrics
+    trade_metrics = analyze_trades(trades)
+    all_trade_analysis.append({
+        'Ticker': ticker,
+        **trade_metrics
+    })
+    
+    # Existing metrics
+    all_metrics.append({
+        'Ticker': ticker,
+        'Cumulative_Return': cumulative_return,
+        'Annualized_Return': annualized_return,
+        'Volatility': volatility,
+        'Max_Drawdown': max_drawdown
+    })
+
+# After all tickers processed
+# 1. Per-ticker results (existing)
+results_df = pd.DataFrame(all_metrics)
+results_df.to_html("trading_results.html", index=False)
+all_generated_files.append("trading_results.html")
+
+# 2. Trade analysis
+trade_analysis_df = pd.DataFrame(all_trade_analysis)
+trade_analysis_df.to_html(f"trade_analysis_{timestamp}.html", index=False)
+all_generated_files.append(f"trade_analysis_{timestamp}.html")
+
+# 3. Aggregate portfolio
+portfolio_df = pd.DataFrame(all_portfolio_series)
+portfolio_df.fillna(method='ffill', inplace=True)
+aggregated_portfolio = portfolio_df.sum(axis=1)
+
+# 4. Portfolio-level metrics
+initial_portfolio = 10000 * len(tickers)
+final_portfolio = aggregated_portfolio.iloc[-1]
+portfolio_returns = aggregated_portfolio.pct_change().dropna()
+
+portfolio_metrics = {
+    'Initial_Portfolio': initial_portfolio,
+    'Final_Portfolio': final_portfolio,
+    'Cumulative_Return': ((final_portfolio / initial_portfolio) - 1) * 100,
+    'Annualized_Return': ((final_portfolio / initial_portfolio) ** (252 / len(aggregated_portfolio)) - 1) * 100,
+    'Volatility': portfolio_returns.std() * np.sqrt(252) * 100,
+    'Max_Drawdown': ((1 - aggregated_portfolio / aggregated_portfolio.cummax()).max()) * 100,
+    'Sharpe_Ratio': (((final_portfolio / initial_portfolio) ** (252 / len(aggregated_portfolio)) - 1) * 100 - 6.5) / (portfolio_returns.std() * np.sqrt(252) * 100),
+    'Gain_to_Loss_Ratio': portfolio_returns[portfolio_returns > 0].sum() / abs(portfolio_returns[portfolio_returns < 0].sum()) if (portfolio_returns < 0).any() else float('inf')
+}
+
+# 5. Save portfolio summary
+portfolio_summary_html = f""
+<html>
+<head><title>Portfolio Summary</title></head>
+<body>
+<h1>Portfolio Summary</h1>
+<h2>Overall Metrics</h2>
+<table border="1">
+  <tr><th>Metric</th><th>Value</th></tr>
+  <tr><td>Initial Portfolio</td><td>₹{portfolio_metrics['Initial_Portfolio']:,.2f}</td></tr>
+  <tr><td>Final Portfolio</td><td>₹{portfolio_metrics['Final_Portfolio']:,.2f}</td></tr>
+  <tr><td>Cumulative Return</td><td>{portfolio_metrics['Cumulative_Return']:.2f}%</td></tr>
+  <tr><td>Annualized Return</td><td>{portfolio_metrics['Annualized_Return']:.2f}%</td></tr>
+  <tr><td>Volatility</td><td>{portfolio_metrics['Volatility']:.2f}%</td></tr>
+  <tr><td>Max Drawdown</td><td>{portfolio_metrics['Max_Drawdown']:.2f}%</td></tr>
+  <tr><td>Sharpe Ratio</td><td>{portfolio_metrics['Sharpe_Ratio']:.2f}</td></tr>
+  <tr><td>Gain-to-Loss Ratio</td><td>{portfolio_metrics['Gain_to_Loss_Ratio']:.2f}</td></tr>
+</table>
+
+<h2>Per-Ticker Contribution</h2>
+{results_df.to_html(index=False)}
+</body>
+</html>
+
+
+with open(f"portfolio_summary_{timestamp}.html", "w") as f:
+    f.write(portfolio_summary_html)
+all_generated_files.append(f"portfolio_summary_{timestamp}.html")
+
+# 6. Portfolio equity curve plot
+fig_portfolio = go.Figure()
+fig_portfolio.add_trace(go.Scatter(
+    x=aggregated_portfolio.index,
+    y=aggregated_portfolio.values,
+    mode='lines',
+    name='Portfolio Value',
+    line=dict(color='blue', width=2)
+))
+fig_portfolio.add_trace(go.Scatter(
+    x=aggregated_portfolio.index,
+    y=[initial_portfolio] * len(aggregated_portfolio),
+    mode='lines',
+    name='Initial Capital',
+    line=dict(color='red', dash='dash')
+))
+fig_portfolio.update_layout(
+    title='Aggregated Portfolio Equity Curve',
+    xaxis_title='Date',
+    yaxis_title='Portfolio Value (INR)',
+    hovermode='x'
+)
+portfolio_plot_file = f"portfolio_equity_curve_{timestamp}.html"
+fig_portfolio.write_html(portfolio_plot_file)
+all_generated_files.append(portfolio_plot_file)
+
 9. **Safety Checks**
     - Always include all necessary library imports at the top, such as import pandas as pd, import numpy as np, import ta, import json and import sqlite3.
    - Make sure the Column names used are: "Ticker", "Date", "Open", "High", "Low", "Close", "Volume". Eg. DO NOT use "Price" instead of "Close".

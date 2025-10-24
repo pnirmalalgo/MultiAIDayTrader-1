@@ -59,6 +59,22 @@ OUTPUT:
 
 - duration_handling: {type: "consecutive"/"non-consecutive", days: int} or null
 - condition_code_snippets: { buy: [list of pandas conditions as strings], sell: [list of pandas conditions as strings] }
+--- PORTFOLIO-LEVEL REQUIREMENTS (NEW SCHEMA KEYS) ---
+
+    The translator_instructions JSON must include these additional keys:
+
+    - **portfolio_config**: {
+        "allocation_per_ticker": 10000,
+        "risk_free_rate": 6.5,
+        "combine_method": "sum"  // how to aggregate ticker portfolios
+    }
+
+    - **required_metrics**: {
+        "ticker_level": ["cumulative_return", "annualized_return", "volatility", "max_drawdown"],
+        "portfolio_level": ["cumulative_return", "annualized_return", "volatility", "max_drawdown", "sharpe_ratio", "gain_to_loss_ratio"],
+        "trade_level": ["total_trades", "winning_trades", "losing_trades", "win_rate", "avg_win", "avg_loss", "profit_factor"]
+    }
+
 - code_tasks: ordered list of granular, executable steps for CodeGen (must mention crossover detection, position checks, stop-loss/take-profit only if requested, portfolio updates, final forced-sell handling, plots)
     The code_tasks list must cover all of: 
         - indicator precomputation, 
@@ -73,6 +89,13 @@ OUTPUT:
         - results saving. 
         Do not skip any.
 - required_files: list of filenames (use placeholders {ticker}, {curr_time_stamp})
+- **required_files** (update to include new files):
+  - "{ticker}_strategy_plot_{curr_time_stamp}.html"
+  - "{ticker}_portfolio_value_{curr_time_stamp}.html"
+  - "trading_results.html"
+  - "portfolio_summary_{curr_time_stamp}.html"  // NEW
+  - "trade_analysis_{curr_time_stamp}.html"     // NEW
+  - "portfolio_equity_curve_{curr_time_stamp}.html"  // NEW
 - plots: list of plot descriptors {type, y, axis: "primary"|"secondary", description}
 - safety_checks: list of assertions/tests to run
 - indicators_to_plot: list of indicator names. MUST always include "Close Price" plus every indicator referenced in buy_spec.conditions and sell_spec.conditions. 
@@ -486,6 +509,16 @@ def translator_mcp(structured_query: dict) -> dict:
         ]
         # Prepend reentry tasks
         translator_json["code_tasks"] = reentry_tasks + translator_json["code_tasks"]
+
+        portfolio_tasks = [
+            "After processing all tickers, aggregate portfolio_series across all tickers",
+            "Calculate portfolio-level metrics: annualized return, volatility, max drawdown, Sharpe ratio, gain-to-loss ratio",
+            "Generate portfolio_summary_{{timestamp}}.html with overall metrics and per-ticker contribution",
+            "For each ticker, analyze trades to calculate win rate, avg win/loss, profit factor",
+            "Generate trade_analysis_{{timestamp}}.html with trade accuracy metrics per ticker",
+            "Create portfolio_equity_curve_{{timestamp}}.html showing aggregated portfolio value over time"
+        ]
+        translator_json["code_tasks"].extend(portfolio_tasks)
 
         # --- Handle additional_buy_condition if present ---
         additional_buy = structured_query["structured_query"].get("additional_buy_condition")

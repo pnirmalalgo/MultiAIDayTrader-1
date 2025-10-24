@@ -148,7 +148,8 @@ class OrchestratorAgent:
         # ✅ Step 2: Resolve tickers
         try:
             self.log_command("call:ticker_lookup")
-            raw_tickers = structured_query.get("ticker", [])
+            #raw_tickers = structured_query.get("ticker", [])
+            raw_tickers = structured_query.get("ticker") or structured_query.get("tickers") or []
             resolved_tickers = resolve_ticker(raw_tickers)
             structured_query["ticker"] = resolved_tickers
             self.log_message("ticker_lookup", f"Resolved tickers: {resolved_tickers}")
