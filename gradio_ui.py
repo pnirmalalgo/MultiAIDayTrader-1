@@ -314,4 +314,4 @@ with gr.Blocks() as demo:
         outputs=iframe_display,
     )
 
-demo.launch(server_port=7861, server_name="0.0.0.0")
+demo.launch(server_port=7860, server_name="0.0.0.0")

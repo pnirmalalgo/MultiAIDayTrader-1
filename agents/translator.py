@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Dict, Any
 import os
 from dotenv import load_dotenv
-from langchain.schema import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
@@ -424,7 +424,8 @@ def translator_mcp(structured_query: dict) -> dict:
         HumanMessage(content=json.dumps(llm_input, indent=2))
     ]
 
-    response = llm(messages)
+    response = llm.invoke(messages)
+    
     content = response.content.strip()
 
     print("DEBUG — Raw LLM output from translator:", content)

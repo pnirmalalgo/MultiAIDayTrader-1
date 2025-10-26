@@ -176,10 +176,14 @@ class OrchestratorAgent:
 
         # ✅ Step 4: Translator — enrich structured query into actionable instructions
         try:
-            self.log_command("call:translator")
-            structured_query["remarks"] = structured_query.get("remarks", "")
-            trans_result = translator_mcp({"structured_query": structured_query})
-
+            try:
+                self.log_command("call:translator")
+                structured_query["remarks"] = structured_query.get("remarks", "")
+                trans_result = translator_mcp({"structured_query": structured_query})
+                self.log_message("translator", f"Translator output keys: {list(trans_result.keys())}")
+            except Exception as e:
+                self.log_message("translator", f"ERROR in translator_mcp: {str(e)}")
+                raise
             enriched_query = trans_result.get("structured_query", structured_query)
             translator_instructions = trans_result
             code_tasks = trans_result.get("code_tasks", [])
