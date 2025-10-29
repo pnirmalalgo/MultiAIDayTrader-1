@@ -20,7 +20,7 @@ os.makedirs(SCRIPT_DIR, exist_ok=True)
 
 # Optionally, set the PLOTS_DIR to the same folder your FastAPI serves via StaticFiles.
 # If FastAPI uses PLOTS_DIR = os.path.abspath("."), keep this as '.'
-PLOTS_DIR = os.path.abspath(".")  
+PLOTS_DIR = os.path.abspath("plots")  
 
 @app.task(bind=True)
 def run_python_code(self, code: str):

@@ -89,13 +89,13 @@ OUTPUT:
         - results saving. 
         Do not skip any.
 - required_files: list of filenames (use placeholders {ticker}, {curr_time_stamp})
-- **required_files** (update to include new files):
-  - "{ticker}_strategy_plot_{curr_time_stamp}.html"
-  - "{ticker}_portfolio_value_{curr_time_stamp}.html"
-  - "trading_results.html"
-  - "portfolio_summary_{curr_time_stamp}.html"  // NEW
-  - "trade_analysis_{curr_time_stamp}.html"     // NEW
-  - "portfolio_equity_curve_{curr_time_stamp}.html"  // NEW
+- **required_files** (update to include new files). store under "plots" folder:
+  - "plots/{ticker}_strategy_plot_{curr_time_stamp}.html"
+  - "plots/{ticker}_portfolio_value_{curr_time_stamp}.html"
+  - "plots/trading_results.html"
+  - "plots/portfolio_summary_{curr_time_stamp}.html"  // NEW
+  - "plots/trade_analysis_{curr_time_stamp}.html"     // NEW
+  - "plots/portfolio_equity_curve_{curr_time_stamp}.html"  // NEW
 - plots: list of plot descriptors {type, y, axis: "primary"|"secondary", description}
 - safety_checks: list of assertions/tests to run
 - indicators_to_plot: list of indicator names. MUST always include "Close Price" plus every indicator referenced in buy_spec.conditions and sell_spec.conditions. 

@@ -23,7 +23,7 @@ app.add_middleware(
 )
 
 # Mount static files for plots
-PLOTS_DIR = Path(".").absolute()
+PLOTS_DIR = Path("plots").absolute()
 app.mount("/plots", StaticFiles(directory=str(PLOTS_DIR)), name="plots")
 
 # Initialize orchestrator

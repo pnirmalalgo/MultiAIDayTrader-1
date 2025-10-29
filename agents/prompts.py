@@ -121,7 +121,7 @@ MUST: Guard all entry_price arithmetic.
 
    - When computing **MACD**, never unpack directly from `ta.trend.MACD(df['Close'])` — it returns an object, not multiple values.
         Correct usage:
-        ```python
+        
         macd = ta.trend.MACD(df['Close'])
         df['MACD'] = macd.macd()
         df['Signal_Line'] = macd.macd_signal()
@@ -521,7 +521,7 @@ Create `trade_analysis_{timestamp}.html` with:
 - Summary row at bottom (aggregate across all tickers)
 
 **Implementation Requirements:**
-```python
+
 # After processing each ticker
 def analyze_trades(trades_list):
     closed_trades = []
@@ -572,18 +572,18 @@ trade_metrics_per_ticker.append({
 ```
 
 **Updated File Generation:**
-The code must generate these files:
-1. `{ticker}_strategy_plot_{timestamp}.html` (per ticker, existing)
-2. `{ticker}_portfolio_value_{timestamp}.html` (per ticker, existing)
-3. `trading_results.html` (per-ticker performance, existing)
-4. `portfolio_summary_{timestamp}.html` (NEW - portfolio-level metrics)
-5. `trade_analysis_{timestamp}.html` (NEW - trade accuracy per ticker)
-6. `portfolio_equity_curve_{timestamp}.html` (NEW - aggregated portfolio plot)
+The code must generate these files under plots folder:
+1. `plots/{ticker}_strategy_plot_{timestamp}.html` (per ticker, existing)
+2. `plots/{ticker}_portfolio_value_{timestamp}.html` (per ticker, existing)
+3. `plots/trading_results.html` (per-ticker performance, existing)
+4. `plots/portfolio_summary_{timestamp}.html` (NEW - portfolio-level metrics)
+5. `plots/trade_analysis_{timestamp}.html` (NEW - trade accuracy per ticker)
+6. `plots/portfolio_equity_curve_{timestamp}.html` (NEW - aggregated portfolio plot)
 
 Add all new files to `generated_files` list.
 
 --- UPDATED AGGREGATION WORKFLOW ---
-```python
+
 # Global lists
 all_metrics = []
 all_trade_analysis = []
@@ -616,12 +616,12 @@ for ticker in tickers:
 # After all tickers processed
 # 1. Per-ticker results (existing)
 results_df = pd.DataFrame(all_metrics)
-results_df.to_html("trading_results.html", index=False)
+results_df.to_html("plots/trading_results.html", index=False)
 all_generated_files.append("trading_results.html")
 
 # 2. Trade analysis
 trade_analysis_df = pd.DataFrame(all_trade_analysis)
-trade_analysis_df.to_html(f"trade_analysis_{timestamp}.html", index=False)
+trade_analysis_df.to_html(f"plots/trade_analysis_{timestamp}.html", index=False)
 all_generated_files.append(f"trade_analysis_{timestamp}.html")
 
 # 3. Aggregate portfolio
@@ -670,7 +670,7 @@ portfolio_summary_html = f""
 </html>
 
 
-with open(f"portfolio_summary_{timestamp}.html", "w") as f:
+with open(f"plots/portfolio_summary_{timestamp}.html", "w") as f:
     f.write(portfolio_summary_html)
 all_generated_files.append(f"portfolio_summary_{timestamp}.html")
 
@@ -696,7 +696,7 @@ fig_portfolio.update_layout(
     yaxis_title='Portfolio Value (INR)',
     hovermode='x'
 )
-portfolio_plot_file = f"portfolio_equity_curve_{timestamp}.html"
+portfolio_plot_file = f"plots/portfolio_equity_curve_{timestamp}.html"
 fig_portfolio.write_html(portfolio_plot_file)
 all_generated_files.append(portfolio_plot_file)
 
@@ -718,7 +718,7 @@ all_generated_files.append(portfolio_plot_file)
         - Before running a backtest, assert that all `indicators` named in translator_instructions exist as DataFrame columns after computation. If any are missing, raise a clear error and stop.
         - If translator_instructions contains buy_spec/sell_spec conditions referencing indicator columns that do not exist, raise/return an error rather than generate code silently.
    - Safety check — generated_files:
-        - The generated_files list must contain exactly the file names produced by the script (per-ticker plots + aggregated trading_results.html). Do not overwrite generated_files between tickers.
+        - The generated_files list must contain exactly the file names produced by the script (per-ticker plots + aggregated trading_results.html). Do not overwrite generated_files between tickers. And these file names should be preceded by plots/ as the files should be stored under plots folder.
 
     - RUNTIME SAFETY (MUST include simple runtime guards):
         1. Before any sell logic that uses entry_price, require:
