@@ -6,9 +6,10 @@ import os
 import re
 
 # -------------------- API URLs --------------------
-API_TASK_STATUS_URL = "http://127.0.0.1:8000/api/task-status"
-API_SUBMIT_URL = "http://127.0.0.1:8000/api/submit-query"
-API_LIST_HTML_URL = "http://127.0.0.1:8000/api/list-html"
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+API_TASK_STATUS_URL = f"{API_BASE_URL}/api/task-status"
+API_SUBMIT_URL = f"{API_BASE_URL}/api/submit-query"
+API_LIST_HTML_URL = f"{API_BASE_URL}/api/list-html"
 
 # -------------------- Utility Functions --------------------
 def get_filtered_tickers():
@@ -40,14 +41,11 @@ def submit_query_to_orchestrator(user_input, filtered_tickers_text):
         structured_query = result.get("structured_query", {})
 
         # Step 2: Merge filtered tickers if present
-        # Step 2: Determine tickers source (textbox > JSON fallback)
         tickers_text = filtered_tickers_text.strip()
         if tickers_text:
-            # User entered tickers in textbox
             tickers_list = [t.strip() for t in re.split(r'[,\s]+', tickers_text) if t.strip()]
             print("DEBUG: Using tickers from textbox:", tickers_list)
         else:
-            # Fallback to JSON file
             tickers_list = get_filtered_tickers()
             print("DEBUG: Using tickers from filtered_tickers.json:", tickers_list)
 
@@ -57,7 +55,6 @@ def submit_query_to_orchestrator(user_input, filtered_tickers_text):
         payload["structured_query"] = structured_query
         print("DEBUG: Payload being sent after merging tickers:", payload)
 
-        # Step 3: Format Chain of Thought (CoT)
         cot_text = "\n".join(
             f"[{t['role'].upper()} - {t['type']}] {t['content']}" for t in thoughts
         )
@@ -158,13 +155,13 @@ def poll_task_status(task_id):
                 <div style="margin-bottom: 20px; border: 1px solid #ccc; border-radius: 8px; padding: 8px;">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
                         <p style="margin: 0;"><strong>{file}</strong></p>
-                        <button onclick="document.getElementById('iframe_{file}').src='http://localhost:8000/plots/{file}?t=' + Date.now()" 
+                        <button onclick="document.getElementById('iframe_{file}').src='{API_BASE_URL}/plots/{file}?t=' + Date.now()" 
                                 style="background: #f0f0f0; border: none; padding: 4px 8px; border-radius: 6px; cursor: pointer;">
                             🔄 Refresh
                         </button>
                     </div>
                     <iframe id="iframe_{file}" 
-                        src="http://localhost:8000/plots/{file}?t={int(time.time())}" 
+                        src="{API_BASE_URL}/plots/{file}?t={int(time.time())}" 
                         width="100%" height="500px"
                         style="border: none; border-radius: 8px; margin-top: 8px;">
                     </iframe>
@@ -227,7 +224,7 @@ def list_plots():
             iframe_html += f"""
                 <div style="margin-bottom: 20px;">
                     <p><strong>{file}</strong></p>
-                    <iframe src="http://localhost:8000/plots/{file}" width="100%" height="500px"
+                    <iframe src="{API_BASE_URL}/plots/{file}" width="100%" height="500px"
                         style="border: 1px solid #ccc; border-radius: 8px;"></iframe>
                 </div>
             """
@@ -270,17 +267,16 @@ with gr.Blocks() as demo:
     flag_btn = gr.Button("🚩 Flag for Review", visible=False)
     refresh_btn = gr.Button("🔄 Refresh Plots", visible=False)
 
-    # ----------------- BUTTON CLICKS -----------------
     submit_btn.click(
         fn=submit_query_to_orchestrator,
-        inputs=[user_input,filtered_tickers_box],
+        inputs=[user_input, filtered_tickers_box],
         outputs=[
             cot_output,
             structured_query_output,
             status_output,
             filtered_tickers_box,
             code_output,
-            gr.State(),  # edit_btn
+            gr.State(),
             confirm_btn,
             reject_btn,
             flag_btn,
