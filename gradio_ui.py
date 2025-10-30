@@ -6,9 +6,7 @@ import os
 import re
 
 # -------------------- API URLs --------------------
-# ✅ CHANGED: Auto-detect if running standalone or mounted
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
-
 API_TASK_STATUS_URL = f"{API_BASE_URL}/api/task-status"
 API_SUBMIT_URL = f"{API_BASE_URL}/api/submit-query"
 API_LIST_HTML_URL = f"{API_BASE_URL}/api/list-html"
@@ -72,21 +70,24 @@ def submit_query_to_orchestrator(user_input, filtered_tickers_text):
         else:
             status_msg = f"Status: {status}"
 
+        # ✅ Make Edit CoT button visible after submission
+                # ✅ Make Edit CoT button visible after submission
         return (
             cot_text,
             structured_query_str,
             status_msg,
             tickers_str,
             "",  # code_output initially empty
-            gr.update(visible=(status=="CLARIFY")),
-            gr.update(visible=(status=="CLARIFY")),
-            gr.update(visible=(status=="CLARIFY")),
-            gr.update(visible=False),
-            gr.update(visible=False),
-            gr.update(interactive=False),
+            gr.update(visible=True),  # edit_btn visible
+            gr.update(visible=(status == "CLARIFY")),  # confirm_btn
+            gr.update(visible=(status == "CLARIFY")),  # reject_btn
+            gr.update(visible=False),  # flag_btn hidden after submit
+            gr.update(visible=False),  # refresh_btn
+            gr.update(visible=False),  # hide submit_btn after submit
             user_input,
             cot_text
         )
+
 
     except Exception as e:
         return (
@@ -94,7 +95,6 @@ def submit_query_to_orchestrator(user_input, filtered_tickers_text):
             "{}",
             f"Exception: {str(e)}",
             "Error loading filtered tickers.",
-            "",
             gr.update(visible=False),
             gr.update(visible=False),
             gr.update(visible=False),
@@ -264,7 +264,7 @@ with gr.Blocks() as demo:
     iframe_display = gr.HTML(label="Generated Plots")
 
     submit_btn = gr.Button("Submit Query")
-    edit_btn = gr.Button("✏️ Edit CoT", visible=False)
+    edit_btn = gr.Button("✏️ Edit CoT", visible=False)  # Initially hidden
     confirm_btn = gr.Button("✅ Confirm Interpretation", visible=False)
     reject_btn = gr.Button("❌ Reject Interpretation", visible=False)
     flag_btn = gr.Button("🚩 Flag for Review", visible=False)
@@ -279,15 +279,22 @@ with gr.Blocks() as demo:
             status_output,
             filtered_tickers_box,
             code_output,
-            edit_btn,
+            edit_btn,  # ✅ show edit button
             confirm_btn,
             reject_btn,
             flag_btn,
             refresh_btn,
             submit_btn,
-            original_query_state,
-            original_cot_state
+            user_input,
+            cot_output
         ],
+    )
+
+    # ✅ New: When user clicks Edit CoT, make CoT textbox editable
+    edit_btn.click(
+        fn=lambda: gr.update(interactive=True),
+        inputs=[],
+        outputs=[cot_output]
     )
 
     confirm_btn.click(
@@ -314,6 +321,6 @@ with gr.Blocks() as demo:
         outputs=iframe_display,
     )
 
-# ✅ CHANGED: Only launch if running as main script
+# ✅ Launch
 if __name__ == "__main__":
     demo.launch(server_port=7860, server_name="0.0.0.0")

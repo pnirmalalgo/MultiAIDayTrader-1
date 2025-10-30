@@ -9,10 +9,12 @@ import time
 
 logging.basicConfig(level=logging.INFO)
 
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
 app = Celery(
     "executor",
-    broker="redis://localhost:6379/0",
-    backend="redis://localhost:6379/0"
+    broker=REDIS_URL,
+    backend=REDIS_URL
 )
 
 SCRIPT_DIR = "generated_scripts"
