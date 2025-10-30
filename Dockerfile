@@ -19,13 +19,15 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY . .
 
 # Create necessary directories for logs, plots, and generated scripts
-RUN mkdir -p /app/generated_scripts /app/plots /app/logs
+# ✅ CHANGED: Added proper permissions to prevent write issues
+RUN mkdir -p /app/generated_scripts /app/plots /app/logs && \
+    chmod -R 755 /app/logs
 
 # Copy supervisor configuration to proper location
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Expose ports for FastAPI and Gradio
-EXPOSE 8000 7860 6379
+# Expose ports (8000 for combined app, 6379 for Redis)
+EXPOSE 8000 6379
 
 # Start supervisor
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

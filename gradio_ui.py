@@ -6,7 +6,9 @@ import os
 import re
 
 # -------------------- API URLs --------------------
+# ✅ CHANGED: Auto-detect if running standalone or mounted
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+
 API_TASK_STATUS_URL = f"{API_BASE_URL}/api/task-status"
 API_SUBMIT_URL = f"{API_BASE_URL}/api/submit-query"
 API_LIST_HTML_URL = f"{API_BASE_URL}/api/list-html"
@@ -92,6 +94,7 @@ def submit_query_to_orchestrator(user_input, filtered_tickers_text):
             "{}",
             f"Exception: {str(e)}",
             "Error loading filtered tickers.",
+            "",
             gr.update(visible=False),
             gr.update(visible=False),
             gr.update(visible=False),
@@ -276,13 +279,14 @@ with gr.Blocks() as demo:
             status_output,
             filtered_tickers_box,
             code_output,
-            gr.State(),
+            edit_btn,
             confirm_btn,
             reject_btn,
             flag_btn,
+            refresh_btn,
             submit_btn,
-            user_input,
-            cot_output
+            original_query_state,
+            original_cot_state
         ],
     )
 
@@ -310,4 +314,6 @@ with gr.Blocks() as demo:
         outputs=iframe_display,
     )
 
-demo.launch(server_port=7860, server_name="0.0.0.0")
+# ✅ CHANGED: Only launch if running as main script
+if __name__ == "__main__":
+    demo.launch(server_port=7860, server_name="0.0.0.0")

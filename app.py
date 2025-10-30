@@ -11,6 +11,15 @@ from agents.orchestrator import OrchestratorAgent
 from celery.result import AsyncResult
 from tasks.executor import app as celery_app
 
+# ✅ ADDED: Import Gradio mounting
+try:
+    from gradio.routes import mount_gradio_app
+    import gradio_ui
+    GRADIO_AVAILABLE = True
+except ImportError:
+    GRADIO_AVAILABLE = False
+    print("⚠️ Gradio not available")
+
 # -------------------- FastAPI Backend --------------------
 app = FastAPI(title="DayTrader AI Agent")
 
@@ -135,6 +144,15 @@ def list_html():
 def health_check():
     """Health check endpoint"""
     return {"status": "healthy"}
+
+# ✅ ADDED: Mount Gradio UI at root path
+if GRADIO_AVAILABLE:
+    try:
+        print("🎨 Mounting Gradio UI...")
+        app = mount_gradio_app(app, gradio_ui.demo, path="/")
+        print("✅ Gradio UI mounted successfully at '/'")
+    except Exception as e:
+        print(f"❌ Failed to mount Gradio: {e}")
 
 # -------------------- Run Server --------------------
 if __name__ == "__main__":
