@@ -73,7 +73,7 @@ def run_python_code(self, code: str):
                     if isinstance(parsed, (list, tuple)):
                         #logs.append("Using parsed file list from output.")
                         files = list(parsed)
-                        #logs.append(f"Detected files: {files}")
+                        logs.append(f"Detected files: {files}")
                         break
                 except Exception:
                     # ignore parse errors, fallback to directory scan
