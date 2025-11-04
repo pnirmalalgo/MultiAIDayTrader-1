@@ -173,11 +173,15 @@ MUST: Guard all entry_price arithmetic.
 
 
 4. **Position & Trade Tracking**
-   - Track `position` (0 = no position, 1 = holding position), `entry_price`, `cash`, `shares`.
+   - Track `position` (0 = no position, 1 = holding position), `entry_price`, `cash`, `shares(float)`.
         - Only execute Buy if position == 0.
         - Only execute Sell if position == 1.
         - Append trades with (action, date, price).
         - Ensure every Buy has a later matching Sell (align trades before plotting).
+   - Use floating-point shares (fractional shares allowed). Do not round or convert shares to integers.
+        - When buying: shares = cash / current_price.
+        - When selling: sell all shares as a floating number.
+
    - Append trades with (`action`, `date`, `price`).
    - No Sell without an active Buy.
    - Ensure every Buy has a later matching Sell (align trades before plotting).
@@ -634,16 +638,33 @@ initial_portfolio = 10000 * len(tickers)
 final_portfolio = aggregated_portfolio.iloc[-1]
 portfolio_returns = aggregated_portfolio.pct_change().dropna()
 
+# Compute portfolio-level performance metrics
 portfolio_metrics = {
-    'Initial_Portfolio': initial_portfolio,
-    'Final_Portfolio': final_portfolio,
-    'Cumulative_Return': ((final_portfolio / initial_portfolio) - 1) * 100,
-    'Annualized_Return': ((final_portfolio / initial_portfolio) ** (252 / len(aggregated_portfolio)) - 1) * 100,
-    'Volatility': portfolio_returns.std() * np.sqrt(252) * 100,
-    'Max_Drawdown': ((1 - aggregated_portfolio / aggregated_portfolio.cummax()).max()) * 100,
-    'Sharpe_Ratio': (((final_portfolio / initial_portfolio) ** (252 / len(aggregated_portfolio)) - 1) * 100 - 6.5) / (portfolio_returns.std() * np.sqrt(252) * 100),
-    'Gain_to_Loss_Ratio': portfolio_returns[portfolio_returns > 0].sum() / abs(portfolio_returns[portfolio_returns < 0].sum()) if (portfolio_returns < 0).any() else float('inf')
+    'Initial_Portfolio': float(initial_portfolio),
+    'Final_Portfolio': float(final_portfolio),
+    'Cumulative_Return': ((final_portfolio / initial_portfolio) - 1) * 100 if initial_portfolio else 0,
+    'Annualized_Return': (((final_portfolio / initial_portfolio) ** (252 / len(aggregated_portfolio))) - 1) * 100 if initial_portfolio and len(aggregated_portfolio) > 0 else 0,
+    'Volatility': portfolio_returns.std() * np.sqrt(252) * 100 if len(portfolio_returns) > 1 else 0,
+    'Max_Drawdown': ((1 - aggregated_portfolio / aggregated_portfolio.cummax()).max()) * 100 if len(aggregated_portfolio) > 1 else 0,
 }
+
+# Risk-free rate (default 6.5% annual for Indian markets); override if provided
+risk_free_rate = 6.5  
+
+# Sharpe Ratio
+if portfolio_metrics['Volatility'] != 0:
+    portfolio_metrics['Sharpe_Ratio'] = (portfolio_metrics['Annualized_Return'] - risk_free_rate) / portfolio_metrics['Volatility']
+else:
+    portfolio_metrics['Sharpe_Ratio'] = 0
+
+# Gain-to-Loss Ratio
+if (portfolio_returns < 0).any():
+    gains = portfolio_returns[portfolio_returns > 0].sum()
+    losses = abs(portfolio_returns[portfolio_returns < 0].sum())
+    portfolio_metrics['Gain_to_Loss_Ratio'] = gains / losses if losses != 0 else float('inf')
+else:
+    portfolio_metrics['Gain_to_Loss_Ratio'] = float('inf')
+
 
 # 5. Save portfolio summary
 portfolio_summary_html = f""
@@ -714,6 +735,13 @@ all_generated_files.append(portfolio_plot_file)
    - Ensure metrics don’t crash on empty datasets.
    - Avoid deprecated methods like DataFrame.append(); use pd.concat() or build a list of dicts.
    - Perform all calculations per ticker; treat a single ticker as a special case.
+   - The performance metrics dictionary must be named `portfolio_metrics`.
+        - Do not use `metrics`, `portfolio_series`, or any other name for this dictionary.
+        - Before computing returns, ensure variables like initial_portfolio, final_portfolio, aggregated_portfolio, and portfolio_returns are defined.
+        - All percentage values should be multiplied by 100.
+        - Handle division by zero safely (e.g., if volatility is 0, Sharpe Ratio = 0).
+- Use risk-free rate of 6.5% unless user specifies differently.
+
    - Indicators cross-check (CODEGEN must implement):
         - Before running a backtest, assert that all `indicators` named in translator_instructions exist as DataFrame columns after computation. If any are missing, raise a clear error and stop.
         - If translator_instructions contains buy_spec/sell_spec conditions referencing indicator columns that do not exist, raise/return an error rather than generate code silently.
