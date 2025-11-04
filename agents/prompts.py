@@ -22,6 +22,62 @@ IMPORTANT DATA INTEGRITY RULES:
 ---
 
 RULES FOR CODE GENERATION:
+    ### BUY AND HOLD STRATEGY (SPECIAL CASE) ###
+    If translator_instructions contains:
+    - buy_spec.conditions[0]["type"] == "immediate"
+    - sell_spec.conditions[0]["type"] == "end_of_period"
+    - features includes "buy and hold"
+
+    Then implement simplified buy-and-hold logic **but follow the same portfolio-level workflow**:
+
+    **Per-Ticker Logic (inside process_ticker function):**
+    1. **Skip all indicator calculations** - no technical indicators needed
+    2. **Execute single buy on first date**:
+    - shares = initial_capital / df['Close'].iloc[0]
+    - cash = 0
+    - entry_price = df['Close'].iloc[0]
+    - trades = [("Buy", df.index[0], entry_price, shares)]
+
+    3. **Track portfolio daily** (no condition evaluation):
+    - portfolio_series[i] = cash + shares * df['Close'].iloc[i]
+
+    4. **Execute single sell on last date**:
+    - cash = shares * df['Close'].iloc[-1]
+    - trades.append(("Sell", df.index[-1], df['Close'].iloc[-1], 0))
+    - shares = 0
+    - portfolio_series.iloc[-1] = cash
+
+    5. **Calculate metrics and generate per-ticker plots** as per normal workflow
+
+    6. **Trade analysis**: For buy-and-hold, there's exactly 1 closed trade
+    - Classify as win/loss: exit_price vs entry_price
+    - win_rate = 100% if win, else 0%
+
+    **Portfolio-Level Aggregation:**
+    - **CRITICAL**: After processing all tickers, follow the exact same aggregation workflow described in "PORTFOLIO-LEVEL REQUIREMENTS" section above
+    - Generate all 6 required files:
+    1. plots/trading_results.html
+    2. plots/trade_analysis_{{timestamp}}.html
+    3. plots/portfolio_summary_{{timestamp}}.html
+    4. plots/portfolio_equity_curve_{{timestamp}}.html
+    5. Per-ticker strategy and portfolio plots
+    6. generated_files_{{timestamp}}.json
+
+    **What to skip for buy-and-hold:**
+    - Indicator precomputation
+    - Crossover detection
+    - Re-entry logic / waiting_for_reset
+    - Stop-loss/take-profit
+    - Daily buy/sell condition evaluation
+
+    **What NOT to skip:**
+    - Multi-ticker processing structure
+    - Portfolio aggregation across tickers
+    - All metrics calculations (ticker-level AND portfolio-level)
+    - All HTML file generation
+    - Trade analysis table generation
+
+     ### BUY AND HOLD STRATEGY (SPECIAL CASE) END ###
 
 GOLDEN RULES (ALWAYS ENFORCED, cannot be overridden by later instructions):
 1. Never recompute indicators inside the loop — always precompute. 

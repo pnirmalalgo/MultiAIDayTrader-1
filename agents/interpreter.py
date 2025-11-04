@@ -62,6 +62,14 @@ Use the following schema for each condition:
 - For crossover or event-based conditions, use:
 +   {{"event": {{"indicator1": "<string>", "operator": "cross_above" | "cross_below", "indicator2": "<string>"}}
 
+### Buy and Hold Strategy Detection ###
+- If the user query mentions "buy and hold", "hold", "long-term investment", or similar passive investment language:
+    - Set "strategy": "BuyAndHold"
+    - Set "buy_condition": {{"logic": "immediate", "conditions": []}}
+    - Set "sell_condition": {{"logic": "end_of_period", "conditions": []}}
+    - Do NOT add any RSI, MACD, or other indicator-based conditions
+    - The buy_condition and sell_condition should remain empty for buy-and-hold
+
 ### Important rules for stop-loss and take-profit ###
 - If a sell condition is percentage-based ("value_type": "percent"):
     - Always calculate relative to the last buy entry price, not daily close.
@@ -209,6 +217,15 @@ The user has provided the following backtest query: {user_query}
     # ✅ If ticker field exists but is a strategy name, clear it
     if structured_query_dict.get("ticker") in ["any", "Moving Average Crossover", "RSI", "MACD", "Bollinger Bands", "Mean Reversion", "Momentum", "Cross Over", "Crossover", "Death Cross", "Golden Cross"]:
         structured_query_dict["ticker"] = []
+
+    # Check if this is buy-and-hold
+    if structured_query_dict.get("strategy") == "BuyAndHold":
+        # Ensure no complex conditions were added
+        if structured_query_dict.get("buy_condition", {}).get("conditions"):
+            structured_query_dict["buy_condition"] = {"logic": "immediate", "conditions": []}
+        if structured_query_dict.get("sell_condition", {}).get("conditions"):
+            structured_query_dict["sell_condition"] = {"logic": "end_of_period", "conditions": []}
+
 
     if not structured_query_dict.get("ticker"):
         return {

@@ -35,6 +35,22 @@ OUTPUT:
   "reentry_rule": "After any trade exit, do not re-enter until the relevant indicator exits the oversold/overbought zone and a fresh crossover occurs."
 }
 
+### BUY AND HOLD STRATEGY HANDLING ###
+- If structured_query["strategy"] == "BuyAndHold":
+    - Set buy_spec to: {"conditions": [{"type": "immediate", "description": "Buy on first available date"}]}
+    - Set sell_spec to: {"conditions": [{"type": "end_of_period", "description": "Sell on last available date"}]}
+    - Set trade_management to: {"entry_tracking": false, "stop_loss_pct": null, "take_profit_pct": null, "reentry_rule": "Not applicable for buy-and-hold"}
+    - Set indicators to: [] (empty list, no indicators needed)
+    - Set indicators_to_plot to: ["Close Price"] (only plot price)
+    - Set code_tasks to include:
+        * "Buy maximum shares on the first date in the filtered date range"
+        * "Hold position throughout the entire period"
+        * "Sell all shares on the last date in the filtered date range"
+        * "Do not evaluate any entry/exit conditions during the holding period"
+        * "Calculate performance metrics based on entry and exit prices only"
+    - Set features to: ["buy and hold", "passive investment"]
+    - Do NOT include any crossover detection, re-entry safeguards, or indicator-based logic
+
 - "features": list of all features that are present in the user's query.  
   To populate this list:
   1. Include "additional buying" if `additional_buy_condition` is present and non-empty.
@@ -414,9 +430,13 @@ def validate_indicators(translator_json):
 def translator_mcp(structured_query: dict) -> dict:
     remarks = structured_query.get("remarks", "")
 
+    # Check for buy-and-hold strategy
+    is_buy_and_hold = structured_query.get("strategy") == "BuyAndHold"
+
     llm_input = {
         "structured_query": structured_query,
-        "remarks": remarks
+        "remarks": remarks,
+        "is_buy_and_hold": is_buy_and_hold  # Pass flag to LLM
     }
 
     messages = [
@@ -433,6 +453,46 @@ def translator_mcp(structured_query: dict) -> dict:
     try:
         translator_json = json.loads(content)
 
+        # Force buy-and-hold structure if detected
+        if is_buy_and_hold:
+            translator_json["indicators"] = []
+            translator_json["indicators_to_plot"] = ["Close Price"]
+            translator_json["buy_spec"] = {
+                "conditions": [{"type": "immediate", "description": "Buy on first available date"}]
+            }
+            translator_json["sell_spec"] = {
+                "conditions": [{"type": "end_of_period", "description": "Sell on last available date"}]
+            }
+            translator_json["trade_management"] = {
+                "entry_tracking": True,
+                "stop_loss_pct": None,
+                "take_profit_pct": None,
+                "reentry_rule": "Not applicable for buy-and-hold"
+            }
+            translator_json["features"] = ["buy and hold", "passive investment"]
+            
+            # Reference existing portfolio instructions instead of repeating
+            translator_json["code_tasks"] = [
+                "Load historical price data for each ticker in the specified date range",
+                "For each ticker: buy maximum shares on first date, hold throughout period, sell all shares on last date",
+                "Track daily portfolio value: cash + shares * current_price",
+                "Calculate standard per-ticker metrics (cumulative return, annualized return, volatility, max drawdown)",
+                "Generate per-ticker strategy and portfolio plots (1 buy marker, 1 sell marker)",
+                "IMPORTANT: Follow all portfolio-level aggregation steps as defined in the main prompt",
+                "Generate all 6 required output files (trading_results, trade_analysis, portfolio_summary, equity_curve, per-ticker plots, JSON)",
+                "Use the same multi-ticker workflow structure - only simplify the trade execution logic"
+            ]
+            
+            # Required files remain the same
+            translator_json["required_files"] = [
+                "plots/{ticker}_strategy_plot_{curr_time_stamp}.html",
+                "plots/{ticker}_portfolio_value_{curr_time_stamp}.html",
+                "plots/trading_results.html",
+                "plots/trade_analysis_{curr_time_stamp}.html",
+                "plots/portfolio_summary_{curr_time_stamp}.html",
+                "plots/portfolio_equity_curve_{curr_time_stamp}.html",
+                "generated_files_{curr_time_stamp}.json"
+            ]
         # --- Skip chained ordering for explicit crossovers ---
         condition_code_snippets = {"buy": [], "sell": []}
 
