@@ -179,7 +179,7 @@ MUST: Guard all entry_price arithmetic.
         - Append trades with (action, date, price).
         - Ensure every Buy has a later matching Sell (align trades before plotting).
    - Use floating-point shares (fractional shares allowed). Do not round or convert shares to integers.
-        - When buying: shares = cash / current_price.
+        - When buying: shares = cash / current_price. NOT shares = cash / current_price
         - When selling: sell all shares as a floating number.
 
    - Append trades with (`action`, `date`, `price`).
@@ -479,6 +479,7 @@ VERY IMPORTANT:
 - Total initial portfolio = 10,000 × number of tickers.
 - Track each ticker's portfolio independently during backtest.
 - After all tickers are processed, aggregate metrics at portfolio level.
+
 
 **Portfolio-Level Metrics (MUST CALCULATE):**
 1. **Annualized Return**: ((final_portfolio_value / initial_portfolio_value) ^ (252 / n_days) - 1) × 100
