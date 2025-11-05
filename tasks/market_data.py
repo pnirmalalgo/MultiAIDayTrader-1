@@ -14,7 +14,7 @@ load_dotenv()
 
 def save_dataframe_to_sqlite(df: pd.DataFrame, db_name="market_data.db", table_name="stock_data"):
     conn = sqlite3.connect(db_name)
-    df.to_sql(table_name, conn, if_exists="replace", index=False)
+    df.to_sql(table_name, conn, index=False)
     conn.close()
     print("✅ Saved to DB:", table_name)
 
