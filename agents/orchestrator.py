@@ -69,40 +69,6 @@ class OrchestratorAgent:
         thoughts = result.get("thought") or result.get("thoughts", "")
         self.log_message("interpreter", thoughts)
 
-        # Step 2.5: Clear previous query data from SQLite
-        try:
-            import sqlite3
-            import os
-
-            db_file = "market_data.db"
-            table_name = "stock_data"
-
-            if os.path.exists(db_file):
-                conn = sqlite3.connect(db_file)
-                cursor = conn.cursor()
-                
-                # Check if the table exists
-                cursor.execute(f"""
-                    SELECT name FROM sqlite_master 
-                    WHERE type='table' AND name='{table_name}';
-                """)
-                table_exists = cursor.fetchone()
-                
-                if table_exists:
-                    print(f"Clearing previous data from table '{table_name}'.")
-                    cursor.execute(f"DELETE FROM {table_name}")
-                    conn.commit()
-                else:
-                    print(f"Table '{table_name}' does not exist. Nothing to clear.")
-                
-                conn.close()
-            else:
-                print(f"Database file '{db_file}' does not exist. Nothing to clear.")
-
-        except Exception as e:
-            self.log_message("orchestrator", f"Failed to clear previous data: {str(e)}")
-
-
         # Step 3: Action and input
         action = result.get("action", "")
         action_input = result.get("action_input", {})
@@ -193,6 +159,7 @@ class OrchestratorAgent:
                 "error": f"Ticker resolution failed: {str(e)}",
                 "thoughts": self.thoughts
             }
+        
 
         # ✅ Step 3: Fetch stock data
         try:
