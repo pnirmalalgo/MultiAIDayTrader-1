@@ -18,7 +18,7 @@ IMPORTANT DATA INTEGRITY RULES:
 - If you detect truncation or malformed ticker JSON, RAISE an Exception ("Ticker list truncated or malformed — aborting generation.") instead of producing partial code.
 - Ensure `tickers` in the generated code matches the full list from translator_instructions without omission.
 - The pipeline downstream depends on exact ticker matching for backtest consistency.
-
+- Define timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") at top of file.
 ---
 
 RULES FOR CODE GENERATION:
@@ -28,56 +28,12 @@ RULES FOR CODE GENERATION:
     - sell_spec.conditions[0]["type"] == "end_of_period"
     - features includes "buy and hold"
 
-    Then implement simplified buy-and-hold logic **but follow the same portfolio-level workflow**:
+    Then:
 
-    **Per-Ticker Logic (inside process_ticker function):**
-    1. **Skip all indicator calculations** - no technical indicators needed
-    2. **Execute single buy on first date**:
-    - shares = initial_capital / df['Close'].iloc[0]
-    - cash = 0
-    - entry_price = df['Close'].iloc[0]
-    - trades = [("Buy", df.index[0], entry_price, shares)]
-
-    3. **Track portfolio daily** (no condition evaluation):
-    - portfolio_series[i] = cash + shares * df['Close'].iloc[i]
-
-    4. **Execute single sell on last date**:
-    - cash = shares * df['Close'].iloc[-1]
-    - trades.append(("Sell", df.index[-1], df['Close'].iloc[-1], 0))
-    - shares = 0
-    - portfolio_series.iloc[-1] = cash
-
-    5. **Calculate metrics and generate per-ticker plots** as per normal workflow
-
-    6. **Trade analysis**: For buy-and-hold, there's exactly 1 closed trade
-    - Classify as win/loss: exit_price vs entry_price
-    - win_rate = 100% if win, else 0%
-
-    **Portfolio-Level Aggregation:**
-    - **CRITICAL**: After processing all tickers, follow the exact same aggregation workflow described in "PORTFOLIO-LEVEL REQUIREMENTS" section above
-    - Generate all 6 required files:
-    1. plots/trading_results.html
-    2. plots/trade_analysis_{{timestamp}}.html
-    3. plots/portfolio_summary_{{timestamp}}.html
-    4. plots/portfolio_equity_curve_{{timestamp}}.html
-    5. Per-ticker strategy and portfolio plots
-    6. generated_files_{{timestamp}}.json
-
-    **What to skip for buy-and-hold:**
-    - Indicator precomputation
-    - Crossover detection
-    - Re-entry logic / waiting_for_reset
-    - Stop-loss/take-profit
-    - Daily buy/sell condition evaluation
-
-    **What NOT to skip:**
-    - Multi-ticker processing structure
-    - Portfolio aggregation across tickers
-    - All metrics calculations (ticker-level AND portfolio-level)
-    - All HTML file generation
-    - Trade analysis table generation
-
-     ### BUY AND HOLD STRATEGY (SPECIAL CASE) END ###
+        1. Buy the stock at the first available date using 100% of capital.
+        2. Hold position until the final available date.
+        3. Sell all shares at the last date in the dataset.
+        
 
 GOLDEN RULES (ALWAYS ENFORCED, cannot be overridden by later instructions):
 1. Never recompute indicators inside the loop — always precompute. 
@@ -169,6 +125,12 @@ MUST: Guard all entry_price arithmetic.
 
    - When calculating a rolling statistic over the past N periods, shift it by 1 period so that today’s value is only compared against the previous N periods, excluding today.
 
+    - Use vectorized pandas/numpy operations wherever possible.
+    - Never modify a DataFrame/Series inside a loop unless necessary.
+    - When initializing any portfolio, equity, or metric time series, always predefine the Series/DataFrame using the same index as the main data, e.g.:
+    `portfolio_series = pd.Series(index=data.index, dtype=float)` or `pd.DataFrame(index=data.index)`.
+    - Never assign values to an empty Series using `.iloc`. Use `.loc[index]` if assigning by label.
+
    ###  DATABASE CONNECTION HANDLING ###
     - NEVER use a single global database connection for all tickers
     - Open a fresh connection per ticker with timeout=30.0
@@ -189,6 +151,7 @@ MUST: Guard all entry_price arithmetic.
         - If combining multiple tickers, use pd.concat(list_of_dataframes) instead of df.append(), and sort by ['Ticker', 'Date'] to preserve ticker separation.
         - Apply rolling statistics, indicators, and trade logic **per ticker** to avoid cross-ticker contamination.
         - If a ticker has no data, append a metrics_dict with zeros and an empty list of files.
+
 
 2. **Indicators**
    - Use ta library for indicators (e.g., ta.momentum.RSIIndicator, ta.trend.SMAIndicator).
@@ -351,7 +314,7 @@ VERY IMPORTANT:
             all_generated_files.append("trading_results.html")
 
         - Write JSON file with all generated files:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            
             with open(f"generated_files_{{timestamp}}.json", "w") as f:
                 json.dump(all_generated_files, f)
             print(json.dumps(all_generated_files))
