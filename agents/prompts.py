@@ -157,7 +157,29 @@ MUST: Guard all entry_price arithmetic.
         IMPORTANT: Get the list of tickers by querying `SELECT DISTINCT Ticker FROM stock_data`. Do not get it from input ticker variable or any other place.
    - Convert Date to datetime, sort ascending, set as index.
    - Fill missing values using both bfill + ffill.
+   **IMPORTANT: Use new pandas syntax (avoid deprecated methods):**
+
+        # CORRECT (pandas >= 2.0)
+        df.ffill(inplace=True)
+        df.bfill(inplace=True)
+        
+        # INCORRECT (deprecated, will cause warnings/errors)
+        df.fillna(method='ffill', inplace=True)  # ❌ DO NOT USE
+        df.fillna(method='bfill', inplace=True)  # ❌ DO NOT USE
+
    - When calculating a rolling statistic over the past N periods, shift it by 1 period so that today’s value is only compared against the previous N periods, excluding today.
+
+   ###  DATABASE CONNECTION HANDLING ###
+    - NEVER use a single global database connection for all tickers
+    - Open a fresh connection per ticker with timeout=30.0
+    - Close connection immediately after fetching data
+    - Use parameterized queries to prevent SQL injection: params=(ticker,)
+
+    ### RESULT COLLECTION PATTERN ###
+    - process_ticker() must RETURN results, not modify globals directly
+    - In main loop, explicitly append returned results to global lists
+    - Add debug print statements to verify collection
+    - Track failed tickers separately
 
    # For multiple tickers:
         - Load each ticker’s data independently from the SQLite database.
@@ -781,6 +803,8 @@ all_generated_files.append(portfolio_plot_file)
 9. **Safety Checks**
     - Always include all necessary library imports at the top, such as import pandas as pd, import numpy as np, import ta, import json and import sqlite3.
    - Make sure the Column names used are: "Ticker", "Date", "Open", "High", "Low", "Close", "Volume". Eg. DO NOT use "Price" instead of "Close".
+    - **Pandas deprecation: Use df.ffill() and df.bfill() instead of df.fillna(method='ffill') / df.fillna(method='bfill').**
+   - **Never use deprecated pandas methods** - they cause FutureWarnings and may fail in pandas 2.x+
    - Ensure Buy/Sell alignment.
    - Verify Buy/Sell alignment: no consecutive Buys or consecutive Sells.
    - After trades are generated, ensure no two trades occur on the same bar/timestamp. If both Buy and Sell conditions would hold simultaneously, only the Buy should take precedence (or vice versa if more natural for the strategy).
