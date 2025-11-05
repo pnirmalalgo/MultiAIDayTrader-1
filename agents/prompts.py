@@ -39,7 +39,6 @@ GOLDEN RULES (ALWAYS ENFORCED, cannot be overridden by later instructions):
 1. Never recompute indicators inside the loop — always precompute. 
 2. Always shift rolling windows by 1 day so today is compared to the past only. 
 3. Always update portfolio value after executing buy/sell logic, not before. 
-4. Always use trades list (not df masks) for entry_price, stop-loss, take-profit, and plotting. 
 5. Always force-close last open trade on final date and set portfolio_series.iloc[-1] = cash. 
 6. All calculations, trades, metrics, and plots are per ticker independently. 
 7. Do not truncate the last buy trade.
@@ -48,40 +47,6 @@ GOLDEN RULES (ALWAYS ENFORCED, cannot be overridden by later instructions):
         3. Use this final sell to ensure that the portfolio value and performance metrics reflect a fully closed position by the end of the backtest.
         4. If a final forced sell is executed at the last closing price, make sure to update the portfolio series so that the last element reflects the new cash-only balance. Explicitly set portfolio_series.iloc[-1] = cash after this forced sell to ensure the portfolio plot and metrics are consistent.
 
-- For any strategy, always interpret translator conditions (buy_spec, sell_spec thresholds) dynamically rather than hardcoding EMA or RSI levels.
-- All formulas or thresholds from translator instructions must be applied as-is using precomputed DataFrame columns.
-- Always guard entry_price usage:
-      if position == 1 and entry_price is not None:
-          # stop-loss / take-profit 
-        
-- All sell, stop-loss, take-profit, reentry,  checks must be inside:
-
-      if position == 1 and entry_price is not None:
-          ...
-
-  This guard is MANDATORY. Never allow code like `current_price < entry_price * ...` outside this block.
-
-    - Never include `entry_price` in any vectorized pandas Series expressions. 
-    - `entry_price` must only be used inside the backtest loop, guarded with `if position == 1 and entry_price is not None:`.
-    - All stop_loss and take_profit checks must be loop-based using entry_price (scalar), not vectorized.
-- Do not reference entry_price in calculations unless it is not None.
-- This prevents NoneType errors in stop-loss/take-profit logic.
-
-MUST: Guard all entry_price arithmetic.
-- Anywhere the generated code uses `entry_price` in arithmetic (stop-loss, take-profit, risk calcs), it MUST first check `position == 1` AND `entry_price is not None` (or `shares > 0`) before performing the calculation.
-- Example requirement wording to include: "Do not perform `entry_price * ...` unless `position == 1 and entry_price is not None`."
-**ENFORCE STRICT GUARD**:
-- Do NOT perform any arithmetic using `entry_price` (e.g., *, /, +, -) **unless**:
-      if position == 1 and entry_price is not None:
-- If a generated line violates this rule, your code MUST raise an Exception or skip it.
-- All reset, take-profit, stop-loss, reentry checks that reference entry_price must live inside this guard.
-- Include explicit examples in the loop:
-
-    if position == 1 and entry_price is not None:
-        if current_price >= entry_price * (1 + TAKE_PROFIT_PERCENT/100):
-            # sell logic
-
-- Any line outside this guard that uses entry_price should never appear.
 
 8. MUTUAL EXCLUSIVITY (MUST): Trade decision code MUST use mutually-exclusive branches so a single bar cannot execute both Buy and Sell.
    - The generated backtest loop MUST follow the provided TRADE LOOP TEMPLATE below exactly (or an equivalent that uses `if ... elif ...` semantics and an executed_action guard).
@@ -130,6 +95,14 @@ MUST: Guard all entry_price arithmetic.
     - When initializing any portfolio, equity, or metric time series, always predefine the Series/DataFrame using the same index as the main data, e.g.:
     `portfolio_series = pd.Series(index=data.index, dtype=float)` or `pd.DataFrame(index=data.index)`.
     - Never assign values to an empty Series using `.iloc`. Use `.loc[index]` if assigning by label.
+    - Always check that key values like entry_price or initial_capital are not None before performing arithmetic.
+    - If a value is None, either skip the calculation, use a safe default, or raise a controlled warning.
+    For eg:
+    if entry_price is None:
+        portfolio_series.iloc[0] = initial_capital
+    else:
+        portfolio_series.iloc[0] = initial_capital - (initial_capital / entry_price) * entry_price
+
 
    ###  DATABASE CONNECTION HANDLING ###
     - NEVER use a single global database connection for all tickers
@@ -160,27 +133,6 @@ MUST: Guard all entry_price arithmetic.
    - Do not recompute indicators inside the backtest loop.
    - If translator_instructions contains `indicators_to_plot`, ensure every item in that list is explicitly plotted in the strategy figure.
 
-   - When computing **MACD**, never unpack directly from `ta.trend.MACD(df['Close'])` — it returns an object, not multiple values.
-        Correct usage:
-        
-        macd = ta.trend.MACD(df['Close'])
-        df['MACD'] = macd.macd()
-        df['Signal_Line'] = macd.macd_signal()
-        df['MACD_Hist'] = macd.macd_diff()
-
-    - When computing Bollinger Bands, never treat ta.volatility.BollingerBands(df['Close']) as subscriptable.
-        Correct usage:
-
-        bb = ta.volatility.BollingerBands(df['Close'], window=20, window_dev=2)
-        df['BB_upper'] = bb.bollinger_hband()
-        df['BB_lower'] = bb.bollinger_lband()
-        df['BB_middle'] = bb.bollinger_mavg()
-
-
-        Always access the upper, lower, and middle bands via the methods above, never by indexing the object.
-
-- Ensure all indicator series have NaN handled (.ffill() and .bfill()) and never recompute inside the loop.
-
 3. ***Implement Buy/Sell logic exactly as defined in translator_instructions:***
    - Only execute Buy if position == 0.
    - Only execute Sell if position == 1.
@@ -197,20 +149,8 @@ MUST: Guard all entry_price arithmetic.
    - Always **check `position` before executing sell**, so sells do not occur without a prior buy.
    - Respect stop-loss and take-profit only if explicitly provided.
    - Track trades as (action, date, price) in a list.
-   - **Always use the trades list for determining entry price and for any sell conditions — do not compute sell signals from the DataFrame alone.**
-   - For crossovers (golden/death cross, RSI thresholds, etc.):
-     - Use explicit detection: `cond = (A > B) & (A.shift(1) <= B.shift(1))` for cross above.
-     - Similarly, `cond = (A < B) & (A.shift(1) >= B.shift(1))` for cross below.
-   - Respect stop_loss / take_profit:
-     - Use `entry_price` per trade.
-     - stop_loss: `current_price <= entry_price * (1 - stop_loss_pct/100)`.
-     - take_profit: `current_price >= entry_price * (1 + take_profit_pct/100)`.
 
 - **Calculate all indicator series (RSI, SMA, etc.) before the loop**, do not recalc per iteration.
-
-- If operator is "chained_trend" or "stepwise_trend", use the precomputed formula string in `formula` directly in your loop.
-    - Example: formula = "(df['EMA_20'] < df['EMA_50']) & (df['EMA_50'] < df['EMA_250'])"
-    - Use this as part of `normal_buy_condition` or `sell_condition` inside the backtest loop.
 
 
 4. **Position & Trade Tracking**
@@ -360,9 +300,7 @@ VERY IMPORTANT:
         Sell condition: Check exit rules, execute sell if holding.
 
         - Store executed price in `trades` at the time of Buy/Sell.
-        - For stop-loss or sell checks, use the stored price from the trades list (e.g., trades[-1][2]) instead of re-fetching it from the DataFrame.
-        - Do not use df.iloc with a timestamp (like trades[-1][1]) because it causes type errors.
-
+        
         Portfolio update: After buy/sell logic, update portfolio_value = cash + shares * current_price and store in portfolio_series.
         - **Important:** Do not update portfolio before the buy/sell logic — always update after executing trades for the day.
 
@@ -437,7 +375,6 @@ VERY IMPORTANT:
 - Update `entry_price` to the trade’s price whenever a buy order is executed.
 - Reset `entry_price` back to None whenever a position is closed.
 - Do NOT use entry_price inside vectorized DataFrame conditions.
-- All stop_loss and take_profit checks that depend on entry_price must be handled INSIDE the backtest loop, only when position == 1 and entry_price is not None.
 - At the DataFrame level, only precompute indicator-based signals (like RSI crossovers). Do not mix entry_price-dependent logic with Series operations.
 - Example:
     df['buy_signal'] = (df['RSI'] > 30) & (df['RSI'].shift(1) <= 30)
@@ -449,13 +386,6 @@ VERY IMPORTANT:
         sell_cond_tp = current_price >= entry_price * 1.15
         if sell_cond_rsi or sell_cond_sl or sell_cond_tp:
         
-- When checking stop-loss or take-profit, always guard the calculation:
-    only evaluate conditions if `entry_price is not None` and `position == 1`.
-    Example:
-        if position == 1 and entry_price is not None:
-            sell_cond_stop_loss = current_price <= entry_price * (1 - STOP_LOSS_PERCENT / 100)
-            sell_cond_take_profit = current_price >= entry_price * (1 + TAKE_PROFIT_PERCENT / 100)
-
 - In sell conditions, always check entry_price is not None before using it.
 - When writing the backtesting loop:
     - Always structure trade conditions using `if ... elif ...` instead of two separate `if` blocks, so that buy and sell actions cannot both trigger on the same day.
@@ -463,8 +393,7 @@ VERY IMPORTANT:
 
 
 7. **Plots** (Use plotly, save as HTML)
-    "IMPORTANT: Your trades list already contains executed buys/sells (tuples (action,date,price)). Use that list to plot markers and to derive entry_price for stop-loss/take-profit logic — do NOT recompute or infer trades from indicator boolean masks."
-
+    
    - Strategy Plot: - Include price, all indicators in `indicators_to_plot`, and buy/sell markers.
    - Buy/Sell markers on strategy plot must reflect the **trades list**, NOT the raw indicator conditions.
    - Do not use DataFrame boolean masks (like `RSI<30`) for plotting; only use dates/prices from executed Buy/Sell tuples (i.e. from the trades list).
@@ -768,6 +697,12 @@ all_generated_files.append(portfolio_plot_file)
    - Make sure the Column names used are: "Ticker", "Date", "Open", "High", "Low", "Close", "Volume". Eg. DO NOT use "Price" instead of "Close".
     - **Pandas deprecation: Use df.ffill() and df.bfill() instead of df.fillna(method='ffill') / df.fillna(method='bfill').**
    - **Never use deprecated pandas methods** - they cause FutureWarnings and may fail in pandas 2.x+
+   - Before performing any arithmetic operations, ensure that all relevant DataFrame columns are numeric. 
+        Use `pd.to_numeric` with `errors='coerce'` to safely convert columns, and handle missing values appropriately.
+        For example, if performing calculations on a column 'Close', first do:
+
+        df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+
    - Ensure Buy/Sell alignment.
    - Verify Buy/Sell alignment: no consecutive Buys or consecutive Sells.
    - After trades are generated, ensure no two trades occur on the same bar/timestamp. If both Buy and Sell conditions would hold simultaneously, only the Buy should take precedence (or vice versa if more natural for the strategy).
