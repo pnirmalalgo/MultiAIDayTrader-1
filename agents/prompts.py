@@ -23,18 +23,82 @@ IMPORTANT DATA INTEGRITY RULES:
 
 RULES FOR CODE GENERATION:
     ### BUY AND HOLD STRATEGY (SPECIAL CASE) ###
-    If translator_instructions contains:
-    - buy_spec.conditions[0]["type"] == "immediate"
-    - sell_spec.conditions[0]["type"] == "end_of_period"
-    - features includes "buy and hold"
+If translator_instructions contains buy_spec.conditions[0]["type"] == "immediate" and features includes "buy and hold":
 
-    Then:
+**Simplified Trade Logic (what to simplify):**
+- Skip: all indicator calculations, crossover detection, re-entry logic, waiting_for_reset
+- Buy: first date → shares = INITIAL_CAPITAL / df['Close'].iloc[0], cash = 0
+- Hold: loop ALL dates calculating portfolio_series.iloc[i] = cash + shares * df['Close'].iloc[i]
+- Sell: last date → cash = shares * df['Close'].iloc[-1], shares = 0
+- Trades: [("Buy", first_date, entry_price, shares), ("Sell", last_date, exit_price, 0)]
 
-        1. Buy the stock at the first available date using 100% of capital.
-        2. Hold position until the final available date.
-        3. Sell all shares at the last date in the dataset.
-        
+**MANDATORY REQUIREMENTS (what NOT to skip):**
 
+1. **Initialize SAME global collections as other strategies:**
+```python
+   all_metrics = []
+   all_trade_analysis = []
+   all_portfolio_series = {}  # CRITICAL - must collect portfolio_series per ticker
+   all_generated_files = []
+```
+
+2. **process_ticker() MUST return 4 items (not just metrics_dict):**
+```python
+   return {
+       'metrics': metrics_dict,           # with Ticker, Cumulative_Return, Annualized_Return, Volatility, Max_Drawdown
+       'trade_metrics': trade_metrics,    # with 1 closed trade analysis
+       'portfolio_series': portfolio_series,  # CRITICAL - daily portfolio values as pandas Series
+       'files': [strategy_plot_file, portfolio_plot_file]
+   }
+```
+
+3. **Calculate metrics using portfolio_series (NOT final cash value):**
+```python
+   # Create portfolio_series tracking daily values
+   portfolio_series = pd.Series(index=df.index, dtype=float)
+   for i in range(len(df)):
+       portfolio_series.iloc[i] = cash + shares * df['Close'].iloc[i]
+   
+   # Use portfolio_series for ALL metrics
+   final_value = portfolio_series.iloc[-1]
+   cumulative_return = ((final_value / initial_capital) - 1) * 100
+   daily_returns = portfolio_series.pct_change().dropna()
+   volatility = daily_returns.std() * np.sqrt(252) * 100
+   max_drawdown = ((1 - portfolio_series / portfolio_series.cummax()).max()) * 100
+```
+
+4. **Trade analysis for 1 closed trade:**
+```python
+   pnl = exit_price - entry_price
+   is_win = (pnl > 0)
+   trade_metrics = {
+       'Ticker': ticker,
+       'total_trades': 1,
+       'winning_trades': 1 if is_win else 0,
+       'losing_trades': 0 if is_win else 1,
+       'win_rate': 100.0 if is_win else 0.0,
+       'avg_win': pnl if is_win else 0,
+       'avg_loss': pnl if not is_win else 0
+   }
+```
+
+5. **Main loop MUST collect ALL return values:**
+```python
+   for ticker in tickers:
+       result = process_ticker(ticker)
+       all_metrics.append(result['metrics'])
+       all_trade_analysis.append(result['trade_metrics'])
+       all_portfolio_series[ticker] = result['portfolio_series']  # CRITICAL
+       all_generated_files.extend(result['files'])
+```
+
+6. **After processing all tickers, MUST generate 4 aggregated files:**
+   - Follow EXACT code in "UPDATED AGGREGATION WORKFLOW" section below
+   - Generate: trading_results.html, trade_analysis_{{timestamp}}.html, portfolio_summary_{{timestamp}}.html, portfolio_equity_curve_{{timestamp}}.html
+
+**This is NOT optional for buy-and-hold. The workflow is identical to other strategies, only the trade logic inside the loop is simplified.**
+
+####------###
 GOLDEN RULES (ALWAYS ENFORCED, cannot be overridden by later instructions):
 1. Never recompute indicators inside the loop — always precompute. 
 2. Always shift rolling windows by 1 day so today is compared to the past only. 
