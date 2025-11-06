@@ -292,7 +292,7 @@ VERY IMPORTANT:
         4. max_drawdown 
         5. annualized_return
    - Cumulative Return = (Vend/Vstart - 1) * 100
-   - Annualized Return = ((Vend/Vstart) ** (252 / total_days) - 1) * 100. Use total_days = len(df).
+   - Annualized Return = (((Vend / Vstart) ** (252 / len(df))) - 1) * 100. Use total_days = len(df).
    - Volatility = std(daily_returns) * sqrt(252) * 100
    - Max Drawdown = max(1 - portfolio / cummax(portfolio)) * 100
    
@@ -334,7 +334,7 @@ VERY IMPORTANT:
             3. Compute daily returns as `portfolio_series.pct_change().dropna()`.
             4. Volatility = daily_returns.std() * sqrt(252) * 100.
             5. Max drawdown = (1 - portfolio_series / portfolio_series.cummax()).max() * 100.
-            6. Annualized return = ((final_portfolio_value / initial_capital) ** (252 / n_days) - 1) * 100, where n_days = len(df).
+            6. Annualized return = (((final_portfolio / initial_capital) ** (252 / n_days)) - 1) * 100, where n_days = len(df).
             7. All calculations (MA, RSI, returns) should be **per ticker**, even for multi-ticker backtests.
             8. If no trades are executed during the backtest, set all performance metrics (cumulative return, annualized return, volatility, max drawdown) to 0 and print "No trades executed in this period.".
                 - Only calculate metrics using the portfolio_series when trades exist.
@@ -516,11 +516,11 @@ VERY IMPORTANT:
 
 
 **Portfolio-Level Metrics (MUST CALCULATE):**
-1. **Annualized Return**: ((final_portfolio_value / initial_portfolio_value) ^ (252 / n_days) - 1) × 100
+1. **Annualized Return**: (((final_portfolio_value / initial_portfolio_value) ** (252 / n_days)) - 1) * 100
 2. **Volatility**: std(daily_portfolio_returns) × sqrt(252) × 100
 3. **Max Drawdown**: max(1 - portfolio_series / portfolio_series.cummax()) × 100
 4. **Sharpe Ratio**: (annualized_return - risk_free_rate) / volatility
-   - Use risk_free_rate = 6.5% (India's 10-year G-Sec rate) or 0 if not specified
+   - Use risk_free_rate = 0
 5. **Gain-to-Loss Ratio**: sum(positive_returns) / abs(sum(negative_returns))
    - Only include days where trades occurred or position changed
 
@@ -683,8 +683,8 @@ portfolio_metrics = {
     'Max_Drawdown': ((1 - aggregated_portfolio / aggregated_portfolio.cummax()).max()) * 100 if len(aggregated_portfolio) > 1 else 0,
 }
 
-# Risk-free rate (default 6.5% annual for Indian markets); override if provided
-risk_free_rate = 6.5  
+# Risk-free rate : use 0
+risk_free_rate = 0
 
 # Sharpe Ratio
 if portfolio_metrics['Volatility'] != 0:
@@ -783,7 +783,7 @@ all_generated_files.append(portfolio_plot_file)
         - Before computing returns, ensure variables like initial_portfolio, final_portfolio, aggregated_portfolio, and portfolio_returns are defined.
         - All percentage values should be multiplied by 100.
         - Handle division by zero safely (e.g., if volatility is 0, Sharpe Ratio = 0).
-- Use risk-free rate of 6.5% unless user specifies differently.
+- Use risk-free rate of 0% unless user specifies differently.
 
    - Indicators cross-check (CODEGEN must implement):
         - Before running a backtest, assert that all `indicators` named in translator_instructions exist as DataFrame columns after computation. If any are missing, raise a clear error and stop.
