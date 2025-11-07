@@ -153,11 +153,28 @@ Each condition is a dictionary. Use one of these operators depending on intent:
 
 
 2) Inequality / price formulas (for stop-loss / take-profit):
+   **CRITICAL: Stop-loss and take-profit MUST be relative to entry_price, NOT previous day:**
+   
+   For stop-loss (10% from entry):
    {
      "indicator": "Close",
-     "operator": "<=" | ">=" | "<" | ">",
-     "formula": "entry_price * (1 - 0.05)"   # string formula allowed; preserve entry_price variable
+     "operator": "<=",
+     "value": 0.90,
+     "value_type": "multiplier",
+     "relative_to": "entry_price"
    }
+   
+   For take-profit (25% from entry):
+   {
+     "indicator": "Close",
+     "operator": ">=",
+     "value": 1.25,
+     "value_type": "multiplier",
+     "relative_to": "entry_price"
+   }
+   
+   **DO NOT use shift(1) or previous day's price for stop-loss/take-profit**
+   These conditions can ONLY be evaluated inside the loop when entry_price exists.
 
 3) Multi-day / persistence:
    {
@@ -210,10 +227,18 @@ IMPORTANT: Ensure that indicators_to_plot is always filled.
 
 2. **Trade management**
    - Always include "entry_tracking": true.
-    - If the user explicitly mentions stop-loss, set stop_loss_pct to the numeric value. Otherwise set it to null.
-    - If the user explicitly mentions take-profit (target), set take_profit_pct to the numeric value. Otherwise set it to null.
-    - Do NOT invent or assume default stop-loss/take-profit values. If not present in the query, these must be null.
-     - If the query does not mention stop-loss or take-profit, you MUST set both stop_loss_pct and take_profit_pct to null and you MUST NOT add them in sell_spec.conditions.
+    - **CRITICAL: Only set stop_loss_pct if user explicitly mentions "stop-loss", "stop loss", or "SL"**
+    - **CRITICAL: Only set take_profit_pct if user explicitly mentions "take-profit", "target", "profit target", or "TP"**
+    - If not mentioned in query → set to null (do NOT invent default values)
+   
+            Example 1: "sell when RSI > 70 or 10% stop-loss or 20% profit"
+            → stop_loss_pct: 10, take_profit_pct: 20
+            
+            Example 2: "sell when MA crosses below"
+            → stop_loss_pct: null, take_profit_pct: null (no SL/TP mentioned)
+            
+   - Do NOT merge with strategy defaults
+   - Do NOT add SL/TP to sell_spec.conditions unless user requested them
     - Do NOT assume default values. Do NOT merge with strategy defaults unless explicitly stated.
      - Always convert oversold/overbought thresholds (like RSI < 30 or RSI > 70) into crossover-based conditions.
     - Buy condition must be encoded as: RSI crosses above 30 after having been below 30.
@@ -280,6 +305,11 @@ Translator JSON (excerpt):
 {
   "human_summary": "RSI recovery strategy: buy on RSI crossing above 30 after being below 30; sell on RSI>70 or SL -5% or TP +15%; enforce re-entry safeguard.",
   "indicators": [{"name":"RSI", "class":"oscillator", "params":{"window":14}, "output_column":"RSI"}],
+  **CRITICAL: Match indicator type to query language:**
+  - "moving average" or "MA" (without "exponential") → use SMA (Simple Moving Average)
+  - "exponential moving average" or "EMA" → use EMA
+  - Example: "20-day MA" → {"name":"SMA_20", "class":"trend", "params":{"window":20}, "output_column":"SMA_20"}
+  - Example: "20-day EMA" → {"name":"EMA_20", "class":"trend", "params":{"window":20}, "output_column":"EMA_20"}
   "date_filter": {"apply": true, "start_date": "2023-09-11", "end_date":"2025-09-11"},
   "buy_spec": {
     "conditions": [
@@ -452,6 +482,16 @@ def translator_mcp(structured_query: dict) -> dict:
 
     try:
         translator_json = json.loads(content)
+
+        # NEW: Validate stop-loss/take-profit encoding
+        for cond in translator_json.get("sell_spec", {}).get("conditions", []):
+            if "formula" in cond and "entry_price" in cond["formula"]:
+                # Ensure it's marked for loop-only evaluation
+                if "relative_to" not in cond:
+                    cond["relative_to"] = "entry_price"
+                # Remove any shift(1) references
+                if "shift" in cond.get("formula", ""):
+                    cond["formula"] = cond["formula"].replace(".shift(1)", "")
 
         # Force buy-and-hold structure if detected
         if is_buy_and_hold:

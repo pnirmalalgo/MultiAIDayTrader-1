@@ -120,6 +120,74 @@ GOLDEN RULES (ALWAYS ENFORCED, cannot be overridden by later instructions):
 
 -------#####--------
 0. ABSOLUTE NONE-SAFETY RULE:
+    -------#####--------
+0. ABSOLUTE NONE-SAFETY RULE (CRITICAL - MUST ENFORCE):
+
+**NEVER compute sell conditions outside the guard block:**
+
+❌ WRONG (will crash):
+```python
+# This evaluates entry_price * 0.90 even when entry_price is None
+sell_cond = (indicator_check) or (current_price <= entry_price * 0.90)
+if position == 1 and entry_price is not None and sell_cond:
+    # sell
+```
+
+✅ CORRECT:
+```python
+# Only evaluate entry_price-based conditions inside the guard
+if position == 1 and entry_price is not None:
+    sell_cond_indicator = (df['EMA_20'].iloc[i] < df['EMA_50'].iloc[i])
+    sell_cond_sl = (current_price <= entry_price * 0.90)  # Safe here
+    sell_cond_tp = (current_price >= entry_price * 1.25)  # Safe here
+    
+    if sell_cond_indicator or sell_cond_sl or sell_cond_tp:
+        # Execute sell
+```
+
+**MANDATORY PATTERN:**
+```python
+# ALWAYS use this structure for any sell logic that references entry_price:
+
+if position == 1 and entry_price is not None:
+    # ALL conditions that use entry_price MUST be inside this block
+    sell_conditions = []
+    
+    # Indicator-based conditions (safe even when entry_price is None)
+    if <indicator_condition>:
+        sell_conditions.append(True)
+    
+    # entry_price-based conditions (ONLY evaluated when entry_price exists)
+    if STOP_LOSS_PERCENT is not None:
+        if current_price <= entry_price * (1 - STOP_LOSS_PERCENT/100):
+            sell_conditions.append(True)
+    
+    if TAKE_PROFIT_PERCENT is not None:
+        if current_price >= entry_price * (1 + TAKE_PROFIT_PERCENT/100):
+            sell_conditions.append(True)
+    
+    if any(sell_conditions):
+        # Execute sell
+```
+
+**FORBIDDEN PATTERNS:**
+```python
+# ❌ NEVER do this:
+sell_cond = (indicator_check) or (entry_price * 0.90)  # entry_price might be None
+
+# ❌ NEVER do this:
+if (some_condition) or (current_price <= entry_price * 0.90):  # entry_price might be None
+
+# ❌ NEVER compute entry_price arithmetic outside the guard:
+stop_loss_price = entry_price * 0.90  # WRONG - might be None
+if position == 1 and current_price <= stop_loss_price:
+    # sell
+```
+
+**The guard `if position == 1 and entry_price is not None:` MUST wrap ALL arithmetic using entry_price.**
+
+-------#####--------
+
    - Never perform arithmetic using `entry_price` unless explicitly guarded.
    - Any use of entry_price in a calculation (multiplication, division, addition, subtraction) MUST be wrapped in:
 
@@ -197,25 +265,144 @@ GOLDEN RULES (ALWAYS ENFORCED, cannot be overridden by later instructions):
    - Do not recompute indicators inside the backtest loop.
    - If translator_instructions contains `indicators_to_plot`, ensure every item in that list is explicitly plotted in the strategy figure.
 
+   
+# ---------------------- Indicator Calculation Rules ----------------------
+If the user mentions any technical indicators (like RSI, MACD, SMA, EMA, Bollinger Bands, etc.),
+compute them using the ta library before applying buy/sell logic.
+
+#### Indicator Computation Rules (Fixed for MACD, RSI, MA, etc.)
+
+- **MACD Calculation (Fix TypeError: cannot unpack non-iterable MACD object)**
+
+Do NOT attempt to unpack:
+
+df['MACD'], df['Signal_Line'] = ta.trend.MACD(df['Close'])
+
+Instead use:
+  macd_indicator = ta.trend.MACD(close=df['Close'])
+  df['MACD'] = macd_indicator.macd()
+  df['MACD_Signal'] = macd_indicator.macd_signal()
+  df['MACD_Hist'] = macd_indicator.macd_diff()
+
+
+RSI Calculation:
+
+df['RSI'] = ta.momentum.RSIIndicator(close=df['Close'], window=14).rsi()
+
+Moving Averages (EMA/SMA):
+
+df['EMA_20'] = ta.trend.EMAIndicator(close=df['Close'], window=20).ema_indicator()
+df['SMA_50'] = ta.trend.SMAIndicator(close=df['Close'], window=50).sma_indicator()
+
+Bollinger Bands:
+bb = ta.volatility.BollingerBands(close=df['Close'], window=20, window_dev=2)
+df['BB_High'] = bb.bollinger_hband()
+df['BB_Low'] = bb.bollinger_lband()
+Ensure all indicators are computed before buy/sell rules are applied.
+
+
 3. ***Implement Buy/Sell logic exactly as defined in translator_instructions:***
    - Only execute Buy if position == 0.
    - Only execute Sell if position == 1.
-   - In the loop, always check:
-    if position == 1 and entry_price is not None:
-        sell_cond_rsi = current_rsi > 70
-        sell_cond_sl = current_price <= entry_price * (1 - STOP_LOSS_PERCENT/100)
-        sell_cond_tp = current_price >= entry_price * (1 + TAKE_PROFIT_PERCENT/100)
-        if sell_cond_rsi or sell_cond_sl or sell_cond_tp:
-            # execute sell
-    - The Buy condition must include `and not waiting_for_reset`.
-    - The Sell condition must always set `shares = 0` after executing the sell.
-    - This ensures the portfolio is fully liquid after any exit.
-   - Always **check `position` before executing sell**, so sells do not occur without a prior buy.
-   - Respect stop-loss and take-profit only if explicitly provided.
-   - Track trades as (action, date, price) in a list.
+   
+   **Sell condition structure (inside loop):**
+```python
+   if position == 1 and entry_price is not None:
+       # Build sell conditions dynamically from translator_instructions
+       sell_conditions = []
+       
+       # Add indicator-based conditions from sell_spec
+       for cond in translator_instructions["sell_spec"]["conditions"]:
+           # Evaluate each condition
+           if <condition_logic>:
+               sell_conditions.append(True)
+       
+       # Add SL/TP only if present in trade_management
+       if trade_mgmt.get("stop_loss_pct") is not None:
+           if current_price <= entry_price * (1 - stop_loss_pct/100):
+               sell_conditions.append(True)
+       
+       if trade_mgmt.get("take_profit_pct") is not None:
+           if current_price >= entry_price * (1 + take_profit_pct/100):
+               sell_conditions.append(True)
+       
+       if any(sell_conditions):
+           # Execute sell
+           cash += shares * current_price
+           shares = 0
+           position = 0
+           entry_price = None
+           waiting_for_reset = True
+```
+- Track trades as (action, date, price) in a list.
 
 - **Calculate all indicator series (RSI, SMA, etc.) before the loop**, do not recalc per iteration.
 
+--- STOP-LOSS AND TAKE-PROFIT HANDLING ---
+
+**General Rules:**
+- STOP_LOSS_PERCENT and TAKE_PROFIT_PERCENT values come from translator_instructions["risk_management"], e.g.:
+    {
+        "risk_management": {
+            "stop_loss_percent": 5,
+            "take_profit_percent": 10
+        }
+    }
+- If either is missing, THEN DO NOT implement Stop Loss/Take Profit logic:
+    STOP_LOSS_PERCENT = 0  (disabled)
+    TAKE_PROFIT_PERCENT = 0 (disabled)
+
+**Implementation Rules:**
+- Read STOP_LOSS_PERCENT and TAKE_PROFIT_PERCENT from translator_instructions["trade_management"]
+- If both are null or missing, DO NOT generate any stop-loss/take-profit code
+- Only generate SL/TP conditions if explicitly present in sell_spec
+
+**Dynamic condition generation:**
+```python
+# At top of script, extract from translator_instructions
+trade_mgmt = translator_instructions.get("trade_management", {})
+STOP_LOSS_PERCENT = trade_mgmt.get("stop_loss_pct")  # Will be None if not specified
+TAKE_PROFIT_PERCENT = trade_mgmt.get("take_profit_pct")  # Will be None if not specified
+
+# In sell logic, only check if they exist
+if position == 1 and entry_price is not None:
+    sell_conditions = []
+    
+    # Indicator-based sell (always present)
+    if <indicator_condition>:
+        sell_conditions.append(True)
+    
+    # Stop-loss (only if specified)
+    if STOP_LOSS_PERCENT is not None:
+        if current_price <= entry_price * (1 - STOP_LOSS_PERCENT/100):
+            sell_conditions.append(True)
+    
+    # Take-profit (only if specified)
+    if TAKE_PROFIT_PERCENT is not None:
+        if current_price >= entry_price * (1 + TAKE_PROFIT_PERCENT/100):
+            sell_conditions.append(True)
+    
+    if any(sell_conditions):
+        # Execute sell
+```
+
+**Key: Generate SL/TP checks conditionally based on whether they're in translator_instructions.**
+**Logic Order:**
+- Stop-loss (SL) and Take-profit (TP) have **equal priority** with RSI-based or other exit rules.
+- If multiple conditions trigger on the same day, **only one sell** executes (use if/elif chain).
+- Do not execute multiple sells on one day.
+
+**Trade Annotation (Optional but Preferred):**
+- Tag the reason for each sell for easier analysis:
+    
+    sell_reason = "Stop-Loss" if sell_cond_sl else "Take-Profit" if sell_cond_tp else "Signal"
+    trades.append(("Sell", current_date, current_price, shares, sell_reason))
+    
+- The `analyze_trades()` function should ignore the 4th field if not provided.
+
+**Edge Handling:**
+- Always guard against entry_price being None before arithmetic.
+- Ensure that if SL or TP triggers, all variables (shares, entry_price, position) are updated consistently before portfolio value is recalculated.
 
 4. **Position & Trade Tracking**
    - Track `position` (0 = no position, 1 = holding position), `entry_price`, `cash`, `shares(float)`.
@@ -240,9 +427,10 @@ GOLDEN RULES (ALWAYS ENFORCED, cannot be overridden by later instructions):
 
 - Implement `waiting_for_reset` to prevent immediate re-entry after a sell.
     - After a sell, set `waiting_for_reset = True`.
-    - Reset `waiting_for_reset = False` only when the next valid re-entry condition occurs 
-      (e.g., golden cross for EMA strategies, or the translator-specified buy setup turning 
-      negative → positive again).
+    - Reset `waiting_for_reset = False` only when the indicator moves AWAY from the trigger:
+        * For MA crossover strategies: reset when short_MA is BELOW long_MA (opposite of buy condition)
+        * For RSI oversold: reset when RSI < 30 (back in oversold zone)
+        * General rule: reset when indicator exits the region that caused the sell
     - Do NOT reset waiting_for_reset inside sell logic.
     - Always include `and not waiting_for_reset` in buy condition.
     - This ensures multiple trade cycles can occur: Sell → wait for reset → Buy again.
@@ -389,6 +577,7 @@ VERY IMPORTANT:
         Append dictionaries to a list and convert the list to a DataFrame after the loop (preferred for speed and clarity).
 
         ##### Portfolio Update Timing ####
+        - **CRITICAL: Portfolio update must happen AFTER all trade logic (buy/sell/reset), never before.**
         - **Do NOT update portfolio_series at the start of the loop.**
         - Update portfolio_series **only after executing all trades** (normal buy, or sell) for the current iteration.
         - At the **end of each backtest loop iteration**, set:
@@ -443,12 +632,35 @@ VERY IMPORTANT:
 - Example:
     df['buy_signal'] = (df['RSI'] > 30) & (df['RSI'].shift(1) <= 30)
 
-    # In loop:
-    if position == 1 and entry_price is not None:
-        sell_cond_rsi = current_rsi > 70
-        sell_cond_sl = current_price <= entry_price * 0.95
-        sell_cond_tp = current_price >= entry_price * 1.15
-        if sell_cond_rsi or sell_cond_sl or sell_cond_tp:
+   - **CRITICAL: ALL sell conditions that reference entry_price MUST be computed inside the guard:**
+```python
+   # Compute indicator conditions outside (they don't need entry_price)
+   sell_signal_indicator = (df['EMA_20'].iloc[i] < df['EMA_50'].iloc[i])
+   
+   # Then evaluate entry_price-based conditions ONLY inside guard
+   if position == 1 and entry_price is not None:
+       # Now it's safe to use entry_price
+       sell_signal_sl = False
+       sell_signal_tp = False
+       
+       if STOP_LOSS_PERCENT is not None:
+           sell_signal_sl = (current_price <= entry_price * (1 - STOP_LOSS_PERCENT/100))
+       
+       if TAKE_PROFIT_PERCENT is not None:
+           sell_signal_tp = (current_price >= entry_price * (1 + TAKE_PROFIT_PERCENT/100))
+       
+       # Combine all sell signals
+       if sell_signal_indicator or sell_signal_sl or sell_signal_tp:
+           # Execute sell
+           cash += shares * current_price
+           trades.append(("Sell", df.index[i], current_price, 0))
+           shares = 0
+           position = 0
+           entry_price = None
+           waiting_for_reset = True
+```
+   
+   **DO NOT compute `entry_price * X` outside the `if position == 1 and entry_price is not None:` block.**
         
 - In sell conditions, always check entry_price is not None before using it.
 - When writing the backtesting loop:
@@ -620,6 +832,26 @@ The code must generate these files under plots folder:
 6. `plots/portfolio_equity_curve_{timestamp}.html` (NEW - aggregated portfolio plot)
 
 Add all new files to `generated_files` list.
+
+--- CRITICAL: MANDATORY FILE GENERATION (CANNOT BE SKIPPED) ---
+
+**The following 6 files MUST be generated for EVERY strategy (including buy-and-hold):**
+
+1. Per-ticker files (2 per ticker):
+   - plots/{ticker}_strategy_plot_{timestamp}.html
+   - plots/{ticker}_portfolio_value_{timestamp}.html
+
+2. Aggregated files (4 total, generated AFTER all tickers):
+   - plots/trading_results.html
+   - plots/trade_analysis_{timestamp}.html
+   - plots/portfolio_summary_{timestamp}.html
+   - plots/portfolio_equity_curve_{timestamp}.html
+
+**ENFORCEMENT RULE:**
+- If ANY of these 6 files are missing, the code is INCOMPLETE and INVALID.
+- The code MUST NOT exit until all 6 files exist and are added to `generated_files`.
+
+**This check is MANDATORY. Do not skip it.**
 
 --- UPDATED AGGREGATION WORKFLOW ---
 
