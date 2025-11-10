@@ -43,9 +43,19 @@ If translator_instructions contains buy_spec.conditions[0]["type"] == "immediate
 ```
 
 2. **process_ticker() MUST return 4 items (not just metrics_dict):**
+    # Inside process_ticker function, before return:
+        metrics_dict = {
+            'Ticker': ticker,
+            'Start_Date': df.index.min().strftime('%Y-%m-%d'),  # Add this
+            'End_Date': df.index.max().strftime('%Y-%m-%d'),    # Add this
+            'Cumulative_Return': cumulative_return,
+            'Annualized_Return': annualized_return,
+            'Volatility': volatility,
+            'Max_Drawdown': max_drawdown
+        }
 ```python
    return {
-       'metrics': metrics_dict,           # with Ticker, Cumulative_Return, Annualized_Return, Volatility, Max_Drawdown
+       'metrics': metrics_dict,           # with Ticker, Start_Date, End_Date, Cumulative_Return, Annualized_Return, Volatility, Max_Drawdown
        'trade_metrics': trade_metrics,    # with 1 closed trade analysis
        'portfolio_series': portfolio_series,  # CRITICAL - daily portfolio values as pandas Series
        'files': [strategy_plot_file, portfolio_plot_file]
@@ -93,6 +103,16 @@ If translator_instructions contains buy_spec.conditions[0]["type"] == "immediate
 ```
 
 6. **After processing all tickers, MUST generate 4 aggregated files:**
+📊 PER-TICKER CONTRIBUTION DISPLAY RULES (MANDATORY):
+- When generating the per-ticker metrics summary (DataFrame, HTML table, or Plotly figure),
+  the columns **must include Start_Date and End_Date** in addition to performance metrics.
+- The required columns order is:
+
+  ['Ticker', 'Start_Date', 'End_Date', 'Cumulative_Return', 'Annualized_Return', 'Volatility', 'Max_Drawdown']
+
+- If generating HTML or interactive tables, these two fields must appear as visible columns in the exported report.
+- This ensures analysts can verify each ticker’s actual date range used in backtesting.
+
    - Follow EXACT code in "UPDATED AGGREGATION WORKFLOW" section below
    - Generate: trading_results.html, trade_analysis_{{timestamp}}.html, portfolio_summary_{{timestamp}}.html, portfolio_equity_curve_{{timestamp}}.html
 
@@ -450,7 +470,7 @@ if position == 1 and entry_price is not None:
 - Include this step **after daily loop** and before metrics calculation.
 
 VERY IMPORTANT:
-- Whenever generating Python code with multiple logical conditions using & and |, always use parentheses to make the intended order of operations explicit. Ensure the final condition evaluates exactly as described in the logic, rather than relying on Python’s operator precedence.
+- Whenever generating Python code with multiple logical conditions using "and" and "or", always use parentheses to make the intended order of operations explicit. Ensure the final condition evaluates exactly as described in the logic, rather than relying on Python’s operator precedence.
 
 5. **Portfolio Simulation**
    - Start with initial_capital = 100000 (or 10,000 if specified in translator_instructions).
@@ -557,6 +577,8 @@ VERY IMPORTANT:
         - **Important:** Do not update portfolio before the buy/sell logic — always update after executing trades for the day.
 
         Calculate performance metrics per ticker.
+        ticker_start_date = result['portfolio_series'].index.min().strftime('%Y-%m-%d')  # ✓ Uses returned data
+        ticker_end_date = result['portfolio_series'].index.max().strftime('%Y-%m-%d')    # ✓ Uses returned data
 
         Cumulative Return = (final_portfolio_value / initial_capital - 1) * 100
 
@@ -853,6 +875,42 @@ Add all new files to `generated_files` list.
 
 **This check is MANDATORY. Do not skip it.**
 
+PLOTTING RULES (MANDATORY — MUST ALWAYS EXECUTE):
+
+For every ticker processed (even if no trades occurred):
+
+1. Create **two plots** unconditionally:
+   - Strategy Plot: price + indicators + buy/sell markers.
+   - Portfolio Value Plot: daily portfolio_series with initial capital line.
+
+2. These plots must always be generated — even if:
+   - There were zero trades.
+   - The strategy never triggered any buy/sell.
+   - The ticker data is partially missing or flat.
+
+3. For tickers with no trades, plot the price and indicators normally but display:
+   - A note/annotation on the plot: “No trades executed for this period.”
+
+4. File naming convention (must always use):
+strategy_plot_file = f"plots/{ticker}strategy_plot{timestamp}.html"
+portfolio_plot_file = f"plots/{ticker}portfolio_plot{timestamp}.html"
+
+Save both files to disk, regardless of trade activity.
+
+5. Append both file paths to all_generated_files:
+all_generated_files.extend([strategy_plot_file, portfolio_plot_file])
+
+6. Always include these two files in the process_ticker() return:
+return {
+'metrics': metrics_dict,
+'trade_metrics': trade_metrics,
+'portfolio_series': portfolio_series,
+'files': [strategy_plot_file, portfolio_plot_file]
+}
+
+7. Never skip plotting logic based on trade count or buy/sell signals.
+Plotting is mandatory for output consistency.
+
 --- UPDATED AGGREGATION WORKFLOW ---
 
 # Global lists
@@ -864,7 +922,17 @@ all_generated_files = []
 # Process each ticker
 for ticker in tickers:
     # ... existing backtest logic ...
+    result = process_ticker(ticker)
     
+    # CRITICAL: Extract start and end dates from the returned DataFrame or portfolio_series
+    # These dates must come from the actual processed data
+    if result and 'portfolio_series' in result:
+        ticker_start_date = result['portfolio_series'].index.min().strftime('%Y-%m-%d')
+        ticker_end_date = result['portfolio_series'].index.max().strftime('%Y-%m-%d')
+    else:
+        ticker_start_date = 'N/A'
+        ticker_end_date = 'N/A'
+
     # Store portfolio series for aggregation
     all_portfolio_series[ticker] = portfolio_series
     
@@ -878,6 +946,8 @@ for ticker in tickers:
     # Existing metrics
     all_metrics.append({
         'Ticker': ticker,
+         'Start_Date': ticker_start_date,
+        'End_Date': ticker_end_date,
         'Cumulative_Return': cumulative_return,
         'Annualized_Return': annualized_return,
         'Volatility': volatility,
@@ -895,9 +965,16 @@ trade_analysis_df = pd.DataFrame(all_trade_analysis)
 trade_analysis_df.to_html(f"plots/trade_analysis_{timestamp}.html", index=False)
 all_generated_files.append(f"trade_analysis_{timestamp}.html")
 
-# 3. Aggregate portfolio
+# 3. Aggregate portfolio - CORRECTED
 portfolio_df = pd.DataFrame(all_portfolio_series)
-portfolio_df.fillna(method='ffill', inplace=True)
+
+# CRITICAL: Forward-fill each ticker's portfolio series to carry last value through end date
+portfolio_df.ffill(inplace=True)
+
+# CRITICAL: Back-fill to handle tickers that started late
+portfolio_df.bfill(inplace=True)
+
+# Now sum across tickers - each column has valid values for all dates
 aggregated_portfolio = portfolio_df.sum(axis=1)
 
 # 4. Portfolio-level metrics
