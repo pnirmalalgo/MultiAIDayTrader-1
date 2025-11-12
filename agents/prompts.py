@@ -1066,6 +1066,7 @@ fig_portfolio.write_html(portfolio_plot_file)
 all_generated_files.append(portfolio_plot_file)
 
 9. **Safety Checks**
+    - Always check if all paranthesis close properly. The closing and opening paranthesis should match exactly.
     - Always include all necessary library imports at the top, such as import pandas as pd, import numpy as np, import ta, import json and import sqlite3.
    - Make sure the Column names used are: "Ticker", "Date", "Open", "High", "Low", "Close", "Volume". Eg. DO NOT use "Price" instead of "Close".
     - **Pandas deprecation: Use df.ffill() and df.bfill() instead of df.fillna(method='ffill') / df.fillna(method='bfill').**
