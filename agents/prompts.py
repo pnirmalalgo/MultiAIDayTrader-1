@@ -27,10 +27,30 @@ If translator_instructions contains buy_spec.conditions[0]["type"] == "immediate
 
 **Simplified Trade Logic (what to simplify):**
 - Skip: all indicator calculations, crossover detection, re-entry logic, waiting_for_reset
-- Buy: first date → shares = INITIAL_CAPITAL / df['Close'].iloc[0], cash = 0
-- Hold: loop ALL dates calculating portfolio_series.iloc[i] = cash + shares * df['Close'].iloc[i]
-- Sell: last date → cash = shares * df['Close'].iloc[-1], shares = 0
-- Trades: [("Buy", first_date, entry_price, shares), ("Sell", last_date, exit_price, 0)]
+When implementing a buy-and-hold strategy:
+
+Assume you invest all initial capital into the stock at the first available close price.
+
+Do not maintain any separate cash variable — the portfolio value equals the number of shares × current close price on each date.
+
+The number of shares = initial_capital / first_close_price.
+
+For each date, compute:
+portfolio_value = shares * current_close_price
+
+Final value = last portfolio value.
+
+Cumulative return (%) = ((final_value / initial_capital) - 1) * 100.
+
+Annualized return (%) = ((1 + cumulative_return/100) ** (252 / len(df)) - 1) * 100, but only if there are enough trading days (e.g. > 60).
+
+Do not add the final sale proceeds to cash again, since that’s already reflected in the portfolio value.
+
+Volatility = standard deviation of daily percentage change of the portfolio value × √252 × 100.
+
+Max drawdown = maximum decline from the portfolio’s historical peak in %.
+
+Return all metrics clearly in a dictionary.
 
 **MANDATORY REQUIREMENTS (what NOT to skip):**
 
@@ -64,17 +84,26 @@ If translator_instructions contains buy_spec.conditions[0]["type"] == "immediate
 
 3. **Calculate metrics using portfolio_series (NOT final cash value):**
 ```python
-   # Create portfolio_series tracking daily values
-   portfolio_series = pd.Series(index=df.index, dtype=float)
-   for i in range(len(df)):
-       portfolio_series.iloc[i] = cash + shares * df['Close'].iloc[i]
-   
-   # Use portfolio_series for ALL metrics
-   final_value = portfolio_series.iloc[-1]
-   cumulative_return = ((final_value / initial_capital) - 1) * 100
-   daily_returns = portfolio_series.pct_change().dropna()
-   volatility = daily_returns.std() * np.sqrt(252) * 100
-   max_drawdown = ((1 - portfolio_series / portfolio_series.cummax()).max()) * 100
+   # Assume full investment on day 1
+entry_price = df['Close'].iloc[0]
+shares = initial_capital / entry_price
+
+# Portfolio value = shares * current close
+portfolio_series = df['Close'] * shares
+
+# Calculate metrics using portfolio_series
+final_value = portfolio_series.iloc[-1]
+cumulative_return = ((final_value / initial_capital) - 1) * 100
+daily_returns = portfolio_series.pct_change().dropna()
+volatility = daily_returns.std() * np.sqrt(252) * 100
+max_drawdown = ((1 - portfolio_series / portfolio_series.cummax()).max()) * 100
+
+# Safer annualization
+trading_days = len(df)
+if trading_days > 60:
+    annualized_return = ((1 + cumulative_return / 100) ** (252 / trading_days) - 1) * 100
+else:
+    annualized_return = cumulative_return  # short period → just report as-is
 ```
 
 4. **Trade analysis for 1 closed trade:**
@@ -1067,6 +1096,10 @@ all_generated_files.append(portfolio_plot_file)
 
 9. **Safety Checks**
     - Always check if all paranthesis close properly. The closing and opening paranthesis should match exactly.
+        - Ensure all parentheses ( ) and curly braces { } inside f-strings are properly matched.
+
+        - For multi-line text output, prefer building strings with "\n".join([...]) or multiple print() calls instead of triple-quoted f-strings.
+
     - Always include all necessary library imports at the top, such as import pandas as pd, import numpy as np, import ta, import json and import sqlite3.
    - Make sure the Column names used are: "Ticker", "Date", "Open", "High", "Low", "Close", "Volume". Eg. DO NOT use "Price" instead of "Close".
     - **Pandas deprecation: Use df.ffill() and df.bfill() instead of df.fillna(method='ffill') / df.fillna(method='bfill').**
