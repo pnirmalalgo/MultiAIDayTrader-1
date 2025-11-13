@@ -825,10 +825,10 @@ Create `trade_analysis_{timestamp}.html` with:
 **Implementation Requirements:**
 
 # After processing each ticker
-def analyze_trades(trades_list):
+def analyze_trades(trades_list, ticker=None):
     closed_trades = []
     for i in range(0, len(trades_list), 2):
-        if i+1 < len(trades_list) and trades_list[i][0] == "Buy" and trades_list[i+1][0] == "Sell":
+        if i + 1 < len(trades_list) and trades_list[i][0] == "Buy" and trades_list[i+1][0] == "Sell":
             buy_price = trades_list[i][2]
             sell_price = trades_list[i+1][2]
             pnl = sell_price - buy_price
@@ -844,32 +844,32 @@ def analyze_trades(trades_list):
     
     if not closed_trades:
         return {
+            'Ticker': ticker,
             'total_trades': 0,
             'winning_trades': 0,
             'losing_trades': 0,
-            'win_rate': 0,
-            'avg_win': 0,
-            'avg_loss': 0,
-            
+            'win_rate': 0.0,
+            'avg_win': 0.0,
+            'avg_loss': 0.0
         }
     
     wins = [t['pnl'] for t in closed_trades if t['win']]
     losses = [t['pnl'] for t in closed_trades if not t['win']]
     
     return {
+        'Ticker': ticker,
         'total_trades': len(closed_trades),
         'winning_trades': len(wins),
         'losing_trades': len(losses),
-        'win_rate': (len(wins) / len(closed_trades)) * 100 if closed_trades else 0,
-        'avg_win': sum(wins) / len(wins) if wins else 0,
-        'avg_loss': sum(losses) / len(losses) if losses else 0,
-        
+        'win_rate': (len(wins) / len(closed_trades)) * 100,
+        'avg_win': sum(wins) / len(wins) if wins else 0.0,
+        'avg_loss': sum(losses) / len(losses) if losses else 0.0
     }
 
 # Store per ticker
 trade_metrics_per_ticker.append({
     'Ticker': ticker,
-    **analyze_trades(trades)
+    **analyze_trades(trades, ticker)
 })
 ```
 
@@ -1102,6 +1102,16 @@ all_generated_files.append(portfolio_plot_file)
 
     - Always include all necessary library imports at the top, such as import pandas as pd, import numpy as np, import ta, import json and import sqlite3.
    - Make sure the Column names used are: "Ticker", "Date", "Open", "High", "Low", "Close", "Volume". Eg. DO NOT use "Price" instead of "Close".
+    - In analyze_trades() or similar metric functions, always check if the trade list is empty before indexing into it.
+            -If empty, return a default dictionary with 0 or None values to prevent IndexError.
+    
+    # --- Strict Code Consistency Rule ---
+        Before finalizing the code, verify that all variables used are defined and consistently named.
+        Ensure no typos or mismatched variable names exist (e.g., 'initial_portital' vs 'initial_capital').
+        Perform an internal variable reference check: every variable must be initialized before use.
+        Do not invent new variable names; reuse those already defined.
+        # ------------------------------------
+        
     - **Pandas deprecation: Use df.ffill() and df.bfill() instead of df.fillna(method='ffill') / df.fillna(method='bfill').**
    - **Never use deprecated pandas methods** - they cause FutureWarnings and may fail in pandas 2.x+
    - Before performing any arithmetic operations, ensure that all relevant DataFrame columns are numeric. 
