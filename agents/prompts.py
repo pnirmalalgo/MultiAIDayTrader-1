@@ -1094,24 +1094,106 @@ portfolio_plot_file = f"plots/portfolio_equity_curve_{timestamp}.html"
 fig_portfolio.write_html(portfolio_plot_file)
 all_generated_files.append(portfolio_plot_file)
 
+**VERIFICATION CHECKLIST (Must verify before completing):**
+- [ ] portfolio_metrics dictionary is created with all 8 metrics
+- [ ] HTML file is generated using .format() method (no formatted string literals)
+- [ ] Portfolio equity curve plot is created with plotly
+- [ ] Both files are added to all_generated_files list
+- [ ] Files are saved to plots/ directory with timestamp
+
 9. **Safety Checks**
     - Always check if all paranthesis close properly. The closing and opening paranthesis should match exactly.
-        - Ensure all parentheses ( ) and curly braces { } inside f-strings are properly matched.
-
-        - For multi-line text output, prefer building strings with "\n".join([...]) or multiple print() calls instead of triple-quoted f-strings.
-
+    
     - Always include all necessary library imports at the top, such as import pandas as pd, import numpy as np, import ta, import json and import sqlite3.
    - Make sure the Column names used are: "Ticker", "Date", "Open", "High", "Low", "Close", "Volume". Eg. DO NOT use "Price" instead of "Close".
     - In analyze_trades() or similar metric functions, always check if the trade list is empty before indexing into it.
             -If empty, return a default dictionary with 0 or None values to prevent IndexError.
+
+    9.1 **Safety Checks & String Formatting**
+    
+    **CRITICAL: NEVER USE F-STRINGS IN GENERATED CODE**
+    - Strings with the letter f before quotes are FORBIDDEN in all generated code
+    - Use ONLY these safe alternatives:
+    
+    ALLOWED string formatting methods:
+    
+    # Method 1: .format() (RECOMMENDED for complex strings)
+    message = "Value: {}, Date: {}".format(value, date)
+    
+    # Method 2: % formatting
+    message = "Value: %s, Date: %s" % (value, date)
+    
+    # Method 3: String concatenation with str()
+    message = "Value: " + str(value) + ", Date: " + str(date)
+    
+    # Method 4: join() for multi-line output
+    lines = [
+        "Metric: {}".format(metric_name),
+        "Value: {}".format(value),
+        "Status: {}".format(status)
+    ]
+    result = "\\n".join(lines)
+    
+    FORBIDDEN patterns (DO NOT USE):
+    - Do NOT prefix any string (single, double, or triple-quoted) with the letter f
+    - Do NOT write: (letter f)(quote marks)(text)(quote marks)
+    - Do NOT use formatted string literals of any kind
+    
+    **HTML Generation:**
+    - For HTML strings, use .format() or % formatting
+    - Build HTML line by line with list + join
+    
+    Example for HTML:
+    html_lines = [
+        "<html>",
+        "<head><title>{}</title></head>".format(title),
+        "<body>",
+        "<h1>{}</h1>".format(header),
+        "<p>Value: {:.2f}</p>".format(value),
+        "</body>",
+        "</html>"
+    ]
+    html = "\\n".join(html_lines)
+    
+    Example for filenames:
+    # Use .format() instead of formatted literals
+    filename = "results_{}_{}.html".format(ticker, timestamp)
+    plot_file = "plots/{}_strategy_plot_{}.html".format(ticker, timestamp)
+    
+    Example for multi-line strings with variables:
+    # Build line by line, then join
+    report_lines = [
+        "=" * 50,
+        "PERFORMANCE REPORT",
+        "=" * 50,
+        "Ticker: {}".format(ticker),
+        "Return: {:.2f}%".format(cumulative_return),
+        "Volatility: {:.2f}%".format(volatility),
+        "=" * 50
+    ]
+    report = "\\n".join(report_lines)
+    
+    **Why this restriction:**
+    - Formatted string literals with nested braces cause parsing errors
+    - Triple-quoted formatted literals are especially problematic
+    - .format() and % formatting are more reliable for AI code generation
+    - This prevents all brace-matching and escaping issues
+    
+    **Other Safety Checks:**
+    - Always check if all parentheses close properly
+    - Ensure all parentheses ( ) and square brackets [ ] are properly matched
+    - When using .format(), ensure the number of {} placeholders matches the number of arguments
+    - Use double backslash (\\n) for newlines in multi-line strings
+
+    ------------------------
     
     # --- Strict Code Consistency Rule ---
         Before finalizing the code, verify that all variables used are defined and consistently named.
         Ensure no typos or mismatched variable names exist (e.g., 'initial_portital' vs 'initial_capital').
         Perform an internal variable reference check: every variable must be initialized before use.
         Do not invent new variable names; reuse those already defined.
-        # ------------------------------------
-        
+    # ------------------------------------
+
     - **Pandas deprecation: Use df.ffill() and df.bfill() instead of df.fillna(method='ffill') / df.fillna(method='bfill').**
    - **Never use deprecated pandas methods** - they cause FutureWarnings and may fail in pandas 2.x+
    - Before performing any arithmetic operations, ensure that all relevant DataFrame columns are numeric. 
