@@ -146,6 +146,8 @@ class OrchestratorAgent:
 
 
         # ✅ Step 2: Resolve tickers
+        # commenting Resolve Tickers for now as we are expecting correct Ticker list as input
+        '''
         try:
             self.log_command("call:ticker_lookup")
             #raw_tickers = structured_query.get("ticker", [])
@@ -159,9 +161,11 @@ class OrchestratorAgent:
                 "error": f"Ticker resolution failed: {str(e)}",
                 "thoughts": self.thoughts
             }
-        
+        '''
 
         # ✅ Step 3: Fetch stock data
+        ##Data is now fetched using cron job###
+        '''
         try:
             self.log_command("call:fetch_stock_data")
             start = structured_query["start_date"]
@@ -174,6 +178,9 @@ class OrchestratorAgent:
                 "error": f"Data fetch failed: {str(e)}",
                 "thoughts": self.thoughts
             }
+        '''
+
+        structured_query["ticker"] = structured_query.get("ticker") or structured_query.get("tickers") or []
 
         # ✅ Step 4: Translator — enrich structured query into actionable instructions
         try:

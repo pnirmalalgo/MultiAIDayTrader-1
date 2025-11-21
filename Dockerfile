@@ -1,13 +1,13 @@
 # Use Python 3.10 slim image
 FROM python:3.10-slim
 
-# Set working directory
 WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     supervisor \
     redis-server \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies
@@ -18,16 +18,14 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Copy application code
 COPY . .
 
-# Create necessary directories for logs, plots, and generated scripts
-# ✅ CHANGED: Added proper permissions to prevent write issues
-RUN mkdir -p /app/generated_scripts /app/plots /app/logs && \
+# Create necessary directories
+RUN mkdir -p /app/generated_scripts /app/plots /app/logs /shared && \
+    chmod -R 777 /shared && \
     chmod -R 755 /app/logs
 
-# Copy supervisor configuration to proper location
+# Copy supervisor config
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Expose ports (8000 for combined app, 6379 for Redis)
 EXPOSE 8000 6379
 
-# Start supervisor
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

@@ -4,6 +4,7 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime
 from .prompts import CODEGEN_PROMPT_BASE
+import json
 
 load_dotenv()
 api_key = os.getenv("OPENAI_API_KEY")
@@ -65,14 +66,7 @@ def codegen_mcp(payload: dict) -> dict:
     # Try multiple locations in order, stop at the first non-empty list
 
     code_tasks = get_code_tasks(payload)
-    #print("Final code_tasks:", code_tasks)
 
-
-    #print("Buy conditions:", buy_condition)
-    #print("Sell conditions:", sell_condition)
-    #print("Code tasks for CodeGen:", code_tasks)
-
-    #sell_condition = translated.get("sell_condition_code") or structured_query.get("sell_condition", "")
     duration_type = structured_query.get("duration_type", "")
     duration_days = int(structured_query.get("duration_days", 0))
     remarks = translated.get("remarks") or structured_query.get("remarks", "")
@@ -80,7 +74,9 @@ def codegen_mcp(payload: dict) -> dict:
     translator_notes = translated.get("codegen_instructions", "")
     #code_tasks = input.get("code_tasks", [])
 
-    CODEGEN_PROMPT = CODEGEN_PROMPT_BASE
+    CODEGEN_PROMPT = CODEGEN_PROMPT_BASE.replace("{{ticker}}", ", ".join(structured_query.get("ticker", ""))) \
+                                    .replace("{{start_date}}", structured_query.get("start_date", "")) \
+                                    .replace("{{end_date}}", structured_query.get("end_date", ""))
 
 
     try:

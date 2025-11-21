@@ -18,7 +18,7 @@ IMPORTANT DATA INTEGRITY RULES:
 - If you detect truncation or malformed ticker JSON, RAISE an Exception ("Ticker list truncated or malformed — aborting generation.") instead of producing partial code.
 - Ensure `tickers` in the generated code matches the full list from translator_instructions without omission.
 - The pipeline downstream depends on exact ticker matching for backtest consistency.
-- Define timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") at top of file.
+
 ---
 
 RULES FOR CODE GENERATION:
@@ -107,19 +107,19 @@ else:
 ```
 
 4. **Trade analysis for 1 closed trade:**
+**CRITICAL:** For Buy & Hold, the PnL must be calculated using the full investment gain. Do not use `entry_price` or `exit_price` arithmetic here to avoid `NoneType` errors. Calculate: `total_pnl = final_value - initial_capital`.
 ```python
-   pnl = exit_price - entry_price
-   is_win = (pnl > 0)
+   total_pnl = final_value - initial_capital
+   is_win = (total_pnl > 0)
    trade_metrics = {
        'Ticker': ticker,
        'total_trades': 1,
        'winning_trades': 1 if is_win else 0,
        'losing_trades': 0 if is_win else 1,
        'win_rate': 100.0 if is_win else 0.0,
-       'avg_win': pnl if is_win else 0,
-       'avg_loss': pnl if not is_win else 0
+       'avg_win': total_pnl if is_win else 0.0,  # Use 0.0 for loss, total_pnl for win
+       'avg_loss': total_pnl if not is_win else 0.0 # Use 0.0 for win, total_pnl for loss
    }
-```
 
 5. **Main loop MUST collect ALL return values:**
 ```python
@@ -168,11 +168,87 @@ GOLDEN RULES (ALWAYS ENFORCED, cannot be overridden by later instructions):
    
 
 -------#####--------
-0. ABSOLUTE NONE-SAFETY RULE:
-    -------#####--------
 0. ABSOLUTE NONE-SAFETY RULE (CRITICAL - MUST ENFORCE):
+****DATAFRAME SAFETY RULES:***
+1. After loading and filtering data (df), the code MUST check:
+   if df is empty or len(df) < 2:
+       return {
+           'metrics': None,
+           'trade_metrics': None,
+           'portfolio_series': None,
+           'files': []
+       }
 
-**NEVER compute sell conditions outside the guard block:**
+2. All uses of df.iloc[...] and df['col'].shift(...) 
+   MUST occur only when len(df) > 1.
+
+3. portfolio_series MUST NOT use iloc[-1] unless:
+       len(portfolio_series) > 0
+
+4. Before computing indicators (RSI/MA/etc), ensure:
+       if len(df) < indicator_window: skip ticker safely.
+
+5. Before forced sell at end:
+       only run if position == 1 AND shares > 0 AND len(df) > 0
+
+6. When combining portfolio series for the portfolio summary,
+   skip any tickers that returned None or empty portfolio series.
+
+   RESULT AGGREGATION SAFETY RULES (NEW — MUST ADD)
+
+7. When returning results from process_ticker, metrics, trade_metrics, and portfolio_series MUST be either:
+
+        valid objects (dict, dict, Series), or
+
+        None if the ticker cannot be processed.
+
+8. In the main loop (where tickers are processed), the generated code MUST use:
+
+    if result and result["metrics"] is not None:
+        all_metrics.append(result["metrics"])
+        all_trade_analysis.append(result["trade_metrics"])
+        all_portfolio_series[ticker] = result["portfolio_series"]
+        all_generated_files.extend(result["files"])
+    else:
+        # append safe placeholder dict instead of None
+        all_metrics.append({
+            "Ticker": ticker,
+            "Start_Date": "N/A",
+            "End_Date": "N/A",
+            "Cumulative_Return": 0.0,
+            "Annualized_Return": 0.0,
+            "Volatility": 0.0,
+            "Max_Drawdown": 0.0,
+        })
+
+        all_trade_analysis.append({
+            "Ticker": ticker,
+            "Trades": 0,
+            "Winning_Trades": 0,
+            "Losing_Trades": 0,
+            "Win_Rate": 0.0,
+            "Average_Return_Per_Trade": 0.0
+        })
+
+
+9. all_metrics and all_trade_analysis MUST NEVER contain None. The generated code MUST ALWAYS append a dict — never a None value.
+
+10. portfolio_series MUST be:
+
+    a valid Series, or
+
+    an empty Series instead of None.
+
+11. Portfolio metrics must ALWAYS be numeric floats.
+    If values are None, empty, or strings, convert them to float(0.0).
+
+    Never pass non-numeric values into "{:.2f}" or "{:,.2f}" formatters.
+
+    Use f-strings with explicit float(...) conversion for all numeric outputs.
+
+    If portfolio_series is empty, set all portfolio summary metrics to 0.0.
+
+****NEVER compute sell conditions outside the guard block:****
 
 ❌ WRONG (will crash):
 ```python
@@ -255,8 +331,12 @@ if position == 1 and current_price <= stop_loss_price:
         if entry_price is not None and (current_price <= entry_price * 0.92):
 
 1. **Data Handling**
-   - Load data from SQLite (no external APIs). Database: market_data.db Table: stock_data Columns: "Ticker", "Date", "Open", "High", "Low", "Close", "Volume"
-        IMPORTANT: Get the list of tickers by querying `SELECT DISTINCT Ticker FROM stock_data`. Do not get it from input ticker variable or any other place.
+   - Load data from SQLite (no external APIs). 
+        Database path: /shared/market_data.db 
+        Table: stock_data 
+        Columns: "Ticker", "Date", "Open", "High", "Low", "Close", "Volume"
+        Always access the database using absolute path "/shared/market_data.db".
+        MANDATORY: Filter the data based on ticker: {{ticker}}, start_date: {{start_date}} and end_date: {{end_date}}. If data is not filtered by start_date and end_date then we will get wrong results.
    - Convert Date to datetime, sort ascending, set as index.
    - Fill missing values using both bfill + ffill.
    **IMPORTANT: Use new pandas syntax (avoid deprecated methods):**
@@ -522,7 +602,37 @@ VERY IMPORTANT:
 
 
 6. **Performance Metrics**
-    Always compute metrics in this order after trades are complete: 
+**CRITICAL: Always check if portfolio_series is empty before computing metrics:**
+    # Check for empty data
+    if len(portfolio_series) == 0 or portfolio_series.empty:
+        # Return zero metrics for tickers with no data
+        metrics_dict = {
+            'Ticker': ticker,
+            'Start_Date': 'N/A',
+            'End_Date': 'N/A',
+            'Cumulative_Return': 0.0,
+            'Annualized_Return': 0.0,
+            'Volatility': 0.0,
+            'Max_Drawdown': 0.0
+        }
+        trade_metrics = {
+            'Ticker': ticker,
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'win_rate': 0.0,
+            'avg_win': 0.0,
+            'avg_loss': 0.0
+        }
+        # Return empty results
+        return {
+            'metrics': metrics_dict,
+            'trade_metrics': trade_metrics,
+            'portfolio_series': pd.Series(dtype=float),
+            'files': []
+        }
+
+    ***Always compute metrics in this order after trades are complete: 
         1. cumulative_return 
         2. daily_returns 
         3. volatility 
@@ -534,6 +644,7 @@ VERY IMPORTANT:
    - Max Drawdown = max(1 - portfolio / cummax(portfolio)) * 100
    
    - Guard against empty DataFrame or zero trades.
+   - **Before accessing portfolio_series.iloc[-1], always check: if len(portfolio_series) == 0, return zero metrics.**
    - Save results in form of table with columns Ticker, Cumulative Return, Annualized Return, Volatility and Max Drawdown and one row for each ticker. Save table to trading_results.html.
    
         ### MULTI-TICKER AGGREGATION & FILE HANDLING FIXES (SURE-SHOT)
@@ -719,8 +830,7 @@ VERY IMPORTANT:
     - Ensure that once a Buy or Sell executes, the other condition is skipped for that bar.
 
 
-7. **Plots** (Use plotly, save as HTML)
-    
+7. **Plots** (Use plotly, save as HTML)    
    - Strategy Plot: - Include price, all indicators in `indicators_to_plot`, and buy/sell markers.
    - Buy/Sell markers on strategy plot must reflect the **trades list**, NOT the raw indicator conditions.
    - Do not use DataFrame boolean masks (like `RSI<30`) for plotting; only use dates/prices from executed Buy/Sell tuples (i.e. from the trades list).
@@ -758,6 +868,59 @@ VERY IMPORTANT:
 
     - Do **not** combine strategy and portfolio lines into a single figure.
     - Save each figure to its own HTML file with timestamped filename.
+
+    ****PLOTLY SUBPLOT ENFORCEMENT (CRITICAL)****
+
+**MANDATORY: When using secondary y-axis, you MUST use make_subplots, NOT go.Figure()**
+
+    ❌ WRONG - This will crash:
+    fig = go.Figure()
+    fig.update_layout(yaxis2_title="RSI")  # ERROR: yaxis2 doesn't exist on regular Figure
+
+    ✅ CORRECT - Always use this pattern:
+    from plotly.subplots import make_subplots
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    # Now yaxis2 properties work:
+    fig.update_yaxes(title_text="Price", secondary_y=False)
+    fig.update_yaxes(title_text="RSI", secondary_y=True)
+
+**RULE: If ANY indicator requires secondary_y=True, the figure MUST be created with make_subplots.**
+
+    Example for strategy plot with RSI:
+    ```python
+    from plotly.subplots import make_subplots
+    import plotly.graph_objects as go
+
+    # Create figure with secondary y-axis
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    # Add price trace (primary y-axis)
+    fig.add_trace(
+        go.Scatter(x=df.index, y=df['Close'], name='Close Price'),
+        secondary_y=False
+    )
+
+    # Add RSI trace (secondary y-axis)
+    fig.add_trace(
+        go.Scatter(x=df.index, y=df['RSI'], name='RSI'),
+        secondary_y=True
+    )
+
+    # Add buy/sell markers (primary y-axis - at price level)
+    if len(buy_dates) > 0:
+        fig.add_trace(
+            go.Scatter(x=buy_dates, y=buy_prices, mode='markers', name='Buy', 
+                    marker=dict(color='green', size=10, symbol='triangle-up')),
+            secondary_y=False
+        )
+
+    # Update axes
+    fig.update_yaxes(title_text="Price", secondary_y=False)
+    fig.update_yaxes(title_text="RSI", secondary_y=True)
+    fig.update_layout(title="Strategy Plot", xaxis_title="Date")
+    ```
+
+    **DO NOT use fig.update_layout(yaxis2_title=...) - it will fail. Use fig.update_yaxes() instead.**
 
 8. **Output Files**
    - {{ticker}}_strategy_plot_{{timestamp}}.html
@@ -1101,14 +1264,16 @@ all_generated_files.append(portfolio_plot_file)
 - [ ] Both files are added to all_generated_files list
 - [ ] Files are saved to plots/ directory with timestamp
 
-9. **Safety Checks**
+9. **Safety Checks** (DO NOT MISS-KEEP THESE IN CONTEXT)
     - Always check if all paranthesis close properly. The closing and opening paranthesis should match exactly.
     
     - Always include all necessary library imports at the top, such as import pandas as pd, import numpy as np, import ta, import json and import sqlite3.
+        Plotting Library Alias: All interactive plotting must use the Plotly library. When using the plotly.graph_objects module, you must use the standard alias go (i.e., import plotly.graph_objects as go) to create figures and traces. For example, use go.Figure() and go.Scatter()
    - Make sure the Column names used are: "Ticker", "Date", "Open", "High", "Low", "Close", "Volume". Eg. DO NOT use "Price" instead of "Close".
     - In analyze_trades() or similar metric functions, always check if the trade list is empty before indexing into it.
             -If empty, return a default dictionary with 0 or None values to prevent IndexError.
 
+    - IMPORTANT: DO NOT MISS: Define timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") at top of file.
     9.1 **Safety Checks & String Formatting**
     
     **CRITICAL: NEVER USE F-STRINGS IN GENERATED CODE**

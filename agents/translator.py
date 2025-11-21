@@ -199,6 +199,27 @@ Each condition is a dictionary. Use one of these operators depending on intent:
 IMPORTANT: Never translate "moves back above" or "moves back below" into > or <. 
 Always encode them as crosses_above or crosses_below with shift(1). 
 
+--- TOUCH/HIT/REACH CONDITION ENCODING ---
+
+**CRITICAL: "touches", "hits", or "reaches" a band/level should use >= or <= (NOT ==)**
+
+When user says:
+- "price touches/hits/reaches lower band" → encode as: {"indicator":"Close", "operator":"<=", "other_indicator":"lower_bollinger_band"}
+- "price touches/hits/reaches upper band" → encode as: {"indicator":"Close", "operator":">=", "other_indicator":"upper_bollinger_band"}
+- "price touches/hits support at X" → encode as: {"indicator":"Close", "operator":"<=", "threshold":X}
+- "price touches/hits resistance at X" → encode as: {"indicator":"Close", "operator":">=", "threshold":X}
+
+**Reasoning**: Price data is continuous, exact equality (==) will almost never trigger. Use directional inequalities:
+- Lower bands/supports: use <=
+- Upper bands/resistances: use >=
+
+**Examples:**
+- "buy when price touches lower Bollinger band" → {"indicator":"Close", "operator":"<=", "other_indicator":"BB_Lower"}
+- "sell when price hits upper Bollinger band" → {"indicator":"Close", "operator":">=", "other_indicator":"BB_Upper"}
+- "buy when close touches 200 SMA" → {"indicator":"Close", "operator":"<=", "other_indicator":"SMA_200"}
+
+**DO NOT use "==" for any band/level touch conditions.**
+
 --- RULES (strict, follow exactly) ---
 
 GOLDEN RULE: Every crossover-based strategy must include a re-entry safeguard. 
