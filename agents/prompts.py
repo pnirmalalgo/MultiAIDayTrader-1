@@ -18,7 +18,7 @@ IMPORTANT DATA INTEGRITY RULES:
 - If you detect truncation or malformed ticker JSON, RAISE an Exception ("Ticker list truncated or malformed — aborting generation.") instead of producing partial code.
 - Ensure `tickers` in the generated code matches the full list from translator_instructions without omission.
 - The pipeline downstream depends on exact ticker matching for backtest consistency.
-
+- Define timestamp = datetime.now().strftime("%Y%m%d_%H%M%S") at top of file.
 ---
 
 RULES FOR CODE GENERATION:
