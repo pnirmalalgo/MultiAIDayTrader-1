@@ -4,6 +4,8 @@ import time
 import json
 import os
 import re
+import logging
+from datetime import datetime
 
 # -------------------- API URLs --------------------
 API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
@@ -11,7 +13,27 @@ API_TASK_STATUS_URL = f"{API_BASE_URL}/api/task-status"
 API_SUBMIT_URL = f"{API_BASE_URL}/api/submit-query"
 API_LIST_HTML_URL = f"{API_BASE_URL}/api/list-html"
 
+# ---------- Logging setup (add once at module top) ----------
+logger = logging.getLogger("poll_task_status_logger")
+if not logger.handlers:
+    logger.setLevel(logging.DEBUG)
+    # Log to the app logs directory used by your compose volume so it's persisted
+    log_path = os.path.join("logs", "poll_task_status.log")
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    fh = logging.FileHandler(log_path, mode="a")
+    fh.setLevel(logging.DEBUG)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+    # Also emit to stdout so `docker-compose logs` / `docker logs` shows it
+    sh = logging.StreamHandler()
+    sh.setLevel(logging.DEBUG)
+    sh.setFormatter(formatter)
+    logger.addHandler(sh)
+# -----------------------------------------------------------
+
 # -------------------- Utility Functions --------------------
+
 def get_filtered_tickers():
     """Load filtered tickers from JSON if available."""
     try:
@@ -112,7 +134,17 @@ def refresh_filtered_tickers_box():
 
 # -------------------- Poll Task Status --------------------
 def poll_task_status(task_id):
-    """Poll Celery task status and return iframe HTML + code."""
+    """
+    Poll Celery task status and return iframe HTML + code.
+    Logs extensively to logs/poll_task_status.log and stdout to help verify code version
+    and the exact 'files' ordering returned by the backend.
+    """
+    import requests
+    import time
+    import re
+
+    logger.info(f"poll_task_status called with task_id={task_id}")
+
     try:
         max_attempts = 60
         delay = 2
@@ -121,39 +153,102 @@ def poll_task_status(task_id):
         py_file = None
 
         for attempt in range(max_attempts):
-            resp = requests.get(f"{API_TASK_STATUS_URL}/{task_id}")
-            status_data = resp.json()
+            try:
+                resp = requests.get(f"{API_TASK_STATUS_URL}/{task_id}")
+                status_data = resp.json()
+            except Exception as e:
+                logger.exception(f"HTTP or JSON error on attempt {attempt+1}: {e}")
+                time.sleep(delay)
+                continue
+
             status = status_data.get("status", "")
             output_log = status_data.get("output", "")
-            print(f"DEBUG: attempt {attempt+1}, status={status}")
+            logger.debug(f"Attempt {attempt+1}: status={status}")
 
-            if status == "SUCCESS":
-                files = status_data.get("files", [])
+            # log the full status_data at DEBUG (careful for sensitive info)
+            logger.debug(f"status_data: {json.dumps(status_data)[:4000]}")  # truncate long logs
+
+            if status == "SUCCESS" or status == "COMPLETED":
+                files = status_data.get("files", []) or []
                 py_file = status_data.get("file")
+                # ensure default summary names exist in list for safety
                 if "trading_results.html" not in files:
                     files.append("trading_results.html")
+                logger.info(f"Task success: files returned count={len(files)}")
                 break
-            elif status == "FAILURE":
-                return "", f"Task failed: {status_data.get('error', 'Unknown error')}", ""
+            elif status == "FAILURE" or status == "FAILED":
+                err = status_data.get("error", "Unknown error")
+                logger.error(f"Task failure: {err}")
+                return "", f"Task failed: {err}", ""
             else:
+                # still pending
                 time.sleep(delay)
 
+        # After polling loop
         if not files and not output_log:
+            logger.warning("No files and no output_log after polling")
             return "", "Task completed but no files found.", ""
 
+        # Heuristic to find python file if not provided
         if not py_file:
             py_file = next((f for f in files if f.endswith(".py")), None)
         if not py_file:
-            match = re.search(r'(generated_scripts/.*?\.py):', output_log)
+            match = re.search(r'(generated_scripts/.*?\.py):', output_log or "")
             py_file = match.group(1) if match else None
 
-        if py_file and os.path.exists(py_file):
-            with open(py_file, "r") as f:
-                py_content = f.read()
-            print(f"DEBUG: Read py_file = {py_file}")
+        if py_file:
+            logger.info(f"py_file resolved to: {py_file}")
+            try:
+                exists = os.path.exists(py_file)
+                logger.info(f"py_file exists: {exists} (path: {py_file})")
+                if exists:
+                    with open(py_file, "r") as f:
+                        py_content = f.read()
+                    logger.debug(f"Read py_file content length: {len(py_content)}")
+            except Exception as e:
+                logger.exception(f"Error reading py_file {py_file}: {e}")
 
+        # ---- Reorder: ensure summary files first ----
+        summary_patterns = [
+            r"portfolio_equity_curve",
+            r"portfolio_summary",
+            r"trading_results"
+        ]
+        summary_files = []
+        for pat in summary_patterns:
+            for f in files:
+                if re.search(pat, f):
+                    if f not in summary_files:
+                        summary_files.append(f)
+
+        # ensure trading_results present
+        if "trading_results.html" not in summary_files:
+            if "trading_results.html" in files:
+                summary_files.append("trading_results.html")
+            else:
+                # still add as placeholder (so it's rendered first if backend produces it later)
+                summary_files.append("trading_results.html")
+
+        other_files = [f for f in files if f not in summary_files]
+        files_ordered = summary_files + other_files
+
+        logger.info(f"files (len={len(files)}): {files}")
+        logger.info(f"files_ordered (len={len(files_ordered)}): {files_ordered}")
+
+        # Log mtime of current Python file to confirm which version is running
+        try:
+            current_module = os.path.abspath(__file__)
+            if os.path.exists(current_module):
+                mtime = os.path.getmtime(current_module)
+                logger.info(f"Current module path: {current_module}, mtime: {datetime.fromtimestamp(mtime).isoformat()}")
+            else:
+                logger.warning(f"Current module __file__ not found: {current_module}")
+        except Exception:
+            logger.exception("Could not stat current module __file__")
+
+        # Build iframe_html
         iframe_html = ""
-        for file in files:
+        for file in files_ordered:
             iframe_html += f"""
                 <div style="margin-bottom: 20px; border: 1px solid #ccc; border-radius: 8px; padding: 8px;">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -170,8 +265,11 @@ def poll_task_status(task_id):
                     </iframe>
                 </div>
             """
+
         return iframe_html, "Task completed successfully.", py_content
+
     except Exception as e:
+        logger.exception(f"Exception polling task status: {e}")
         return "", f"Exception polling task status: {str(e)}", ""
 
 # -------------------- Confirm / Flag --------------------
