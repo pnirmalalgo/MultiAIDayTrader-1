@@ -227,6 +227,7 @@ The user has provided the following backtest query: {user_query}
             structured_query_dict["sell_condition"] = {"logic": "end_of_period", "conditions": []}
 
 
+    '''The ticker information now comes from NL query processor
     if not structured_query_dict.get("ticker"):
         return {
             "thought": thoughts_text.strip(),
@@ -236,6 +237,7 @@ The user has provided the following backtest query: {user_query}
                 "structured_query": structured_query_dict
             }
         }
+        '''
     #  Missing start_date
     if not structured_query_dict.get("start_date"):
         return {

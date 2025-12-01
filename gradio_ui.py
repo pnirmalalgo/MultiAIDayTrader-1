@@ -13,11 +13,12 @@ API_TASK_STATUS_URL = f"{API_BASE_URL}/api/task-status"
 API_SUBMIT_URL = f"{API_BASE_URL}/api/submit-query"
 API_LIST_HTML_URL = f"{API_BASE_URL}/api/list-html"
 
-# ---------- Logging setup (add once at module top) ----------
+SCRIPT_DIR = "/app/generated_scripts"
+
+# ---------- Logging setup ----------
 logger = logging.getLogger("poll_task_status_logger")
 if not logger.handlers:
     logger.setLevel(logging.DEBUG)
-    # Log to the app logs directory used by your compose volume so it's persisted
     log_path = os.path.join("logs", "poll_task_status.log")
     os.makedirs(os.path.dirname(log_path), exist_ok=True)
     fh = logging.FileHandler(log_path, mode="a")
@@ -25,14 +26,12 @@ if not logger.handlers:
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     fh.setFormatter(formatter)
     logger.addHandler(fh)
-    # Also emit to stdout so `docker-compose logs` / `docker logs` shows it
     sh = logging.StreamHandler()
     sh.setLevel(logging.DEBUG)
     sh.setFormatter(formatter)
     logger.addHandler(sh)
-# -----------------------------------------------------------
 
-# -------------------- Utility Functions --------------------
+# -------------------- Utility Functions (unchanged) --------------------
 
 def get_filtered_tickers():
     """Load filtered tickers from JSON if available."""
@@ -46,23 +45,22 @@ def get_filtered_tickers():
         print("DEBUG: Error loading filtered tickers:", e)
         return []
 
-# -------------------- Gradio Core Functions --------------------
+# -------------------- Gradio Core Functions (unchanged) --------------------
 def submit_query_to_orchestrator(user_input, filtered_tickers_text):
     """
     Submit user query to the FastAPI Orchestrator endpoint.
-    Overrides only tickers with filtered_tickers.json if available.
     """
     try:
         payload = {"query": user_input}
 
-        # Step 1: Send initial query to get structured query from orchestrator
+        # Step 1: Send initial query
         resp = requests.post(API_SUBMIT_URL, json=payload)
         result = resp.json()
         thoughts = result.get("thoughts", [])
         status = result.get("status", "")
         structured_query = result.get("structured_query", {})
 
-        # Step 2: Merge filtered tickers if present
+        # Step 2: Merge filtered tickers
         tickers_text = filtered_tickers_text.strip()
         if tickers_text:
             tickers_list = [t.strip() for t in re.split(r'[,\s]+', tickers_text) if t.strip()]
@@ -92,57 +90,51 @@ def submit_query_to_orchestrator(user_input, filtered_tickers_text):
         else:
             status_msg = f"Status: {status}"
 
-        # ✅ Make Edit CoT button visible after submission
-                # ✅ Make Edit CoT button visible after submission
+        # CRITICAL: Return exact number of outputs matching the outputs list
         return (
-            cot_text,
-            structured_query_str,
-            status_msg,
-            tickers_str,
-            "",  # code_output initially empty
-            gr.update(visible=True),  # edit_btn visible
-            gr.update(visible=(status == "CLARIFY")),  # confirm_btn
-            gr.update(visible=(status == "CLARIFY")),  # reject_btn
-            gr.update(visible=False),  # flag_btn hidden after submit
-            gr.update(visible=False),  # refresh_btn
-            gr.update(visible=False),  # hide submit_btn after submit
-            user_input,
-            cot_text
+            cot_text,                                      # cot_output
+            structured_query_str,                          # structured_query_output (State)
+            status_msg,                                    # status_output
+            tickers_str,                                   # filtered_tickers_box
+            "",                                            # code_output (cleared on initial submit)
+            gr.update(visible=True),                       # edit_btn
+            gr.update(visible=(status == "CLARIFY")),      # confirm_btn
+            gr.update(visible=(status == "CLARIFY")),      # reject_btn
+            gr.update(visible=False),                      # flag_btn
+            gr.update(visible=False),                      # refresh_btn
+            gr.update(visible=False),                      # submit_btn
+            user_input,                                    # original_query_state (State)
+            cot_text                                       # original_cot_state (State)
         )
 
-
     except Exception as e:
+        logger.exception(f"Error in submit_query_to_orchestrator: {e}")
         return (
             "",
             "{}",
             f"Exception: {str(e)}",
             "Error loading filtered tickers.",
+            "",                                # code_output
             gr.update(visible=False),
             gr.update(visible=False),
             gr.update(visible=False),
             gr.update(visible=False),
             gr.update(visible=False),
-            gr.update(interactive=True),
+            gr.update(visible=True),           # re-enable submit button
             user_input,
             ""
         )
 
 def refresh_filtered_tickers_box():
-    """Return current filtered tickers as a comma-separated string for the textbox."""
+    """Return current filtered tickers as a comma-separated string."""
     tickers = get_filtered_tickers()
     return ", ".join(tickers) if tickers else "No filtered tickers found."
 
-# -------------------- Poll Task Status --------------------
+# -------------------- Poll Task Status (unchanged) --------------------
 def poll_task_status(task_id):
     """
     Poll Celery task status and return iframe HTML + code.
-    Logs extensively to logs/poll_task_status.log and stdout to help verify code version
-    and the exact 'files' ordering returned by the backend.
     """
-    import requests
-    import time
-    import re
-
     logger.info(f"poll_task_status called with task_id={task_id}")
 
     try:
@@ -165,50 +157,38 @@ def poll_task_status(task_id):
             output_log = status_data.get("output", "")
             logger.debug(f"Attempt {attempt+1}: status={status}")
 
-            # log the full status_data at DEBUG (careful for sensitive info)
-            logger.debug(f"status_data: {json.dumps(status_data)[:4000]}")  # truncate long logs
-
             if status == "SUCCESS" or status == "COMPLETED":
                 files = status_data.get("files", []) or []
                 py_file = status_data.get("file")
-                # ensure default summary names exist in list for safety
                 if "trading_results.html" not in files:
                     files.append("trading_results.html")
-                logger.info(f"Task success: files returned count={len(files)}")
+                logger.info(f"Task success: files returned count={len(files)}, py_file={py_file}")
                 break
             elif status == "FAILURE" or status == "FAILED":
                 err = status_data.get("error", "Unknown error")
                 logger.error(f"Task failure: {err}")
                 return "", f"Task failed: {err}", ""
             else:
-                # still pending
                 time.sleep(delay)
 
-        # After polling loop
+        # Read Python file content
+        if py_file and os.path.exists(py_file):
+            try:
+                with open(py_file, "r") as f:
+                    py_content = f.read()
+                logger.info(f"✅ Successfully read py_file. Length: {len(py_content)}")
+            except Exception as e:
+                logger.exception(f"❌ Error reading py_file {py_file}: {e}")
+                py_content = "# Error reading file"
+        else:
+            logger.warning(f"⚠️ Python file not found: {py_file}")
+            py_content = "# Python file not found"
+
         if not files and not output_log:
             logger.warning("No files and no output_log after polling")
-            return "", "Task completed but no files found.", ""
+            return "", "Task completed but no files found.", py_content
 
-        # Heuristic to find python file if not provided
-        if not py_file:
-            py_file = next((f for f in files if f.endswith(".py")), None)
-        if not py_file:
-            match = re.search(r'(generated_scripts/.*?\.py):', output_log or "")
-            py_file = match.group(1) if match else None
-
-        if py_file:
-            logger.info(f"py_file resolved to: {py_file}")
-            try:
-                exists = os.path.exists(py_file)
-                logger.info(f"py_file exists: {exists} (path: {py_file})")
-                if exists:
-                    with open(py_file, "r") as f:
-                        py_content = f.read()
-                    logger.debug(f"Read py_file content length: {len(py_content)}")
-            except Exception as e:
-                logger.exception(f"Error reading py_file {py_file}: {e}")
-
-        # ---- Reorder: ensure summary files first ----
+        # Reorder files (unchanged)
         summary_patterns = [
             r"portfolio_equity_curve",
             r"portfolio_summary",
@@ -221,32 +201,18 @@ def poll_task_status(task_id):
                     if f not in summary_files:
                         summary_files.append(f)
 
-        # ensure trading_results present
         if "trading_results.html" not in summary_files:
             if "trading_results.html" in files:
                 summary_files.append("trading_results.html")
             else:
-                # still add as placeholder (so it's rendered first if backend produces it later)
                 summary_files.append("trading_results.html")
 
         other_files = [f for f in files if f not in summary_files]
         files_ordered = summary_files + other_files
 
-        logger.info(f"files (len={len(files)}): {files}")
-        logger.info(f"files_ordered (len={len(files_ordered)}): {files_ordered}")
+        logger.info(f"files_ordered: {files_ordered}")
 
-        # Log mtime of current Python file to confirm which version is running
-        try:
-            current_module = os.path.abspath(__file__)
-            if os.path.exists(current_module):
-                mtime = os.path.getmtime(current_module)
-                logger.info(f"Current module path: {current_module}, mtime: {datetime.fromtimestamp(mtime).isoformat()}")
-            else:
-                logger.warning(f"Current module __file__ not found: {current_module}")
-        except Exception:
-            logger.exception("Could not stat current module __file__")
-
-        # Build iframe_html
+        # Build iframe_html (unchanged)
         iframe_html = ""
         for file in files_ordered:
             iframe_html += f"""
@@ -266,13 +232,14 @@ def poll_task_status(task_id):
                 </div>
             """
 
+        logger.info(f"✅ Returning py_content length: {len(py_content)}")
         return iframe_html, "Task completed successfully.", py_content
 
     except Exception as e:
         logger.exception(f"Exception polling task status: {e}")
         return "", f"Exception polling task status: {str(e)}", ""
 
-# -------------------- Confirm / Flag --------------------
+# -------------------- Confirm / Flag (unchanged) --------------------
 def on_user_confirms_interpretation(structured_query_str, cot_text, user_query, original_query, original_cot):
     """Send confirmation to Orchestrator and display results."""
     try:
@@ -287,19 +254,33 @@ def on_user_confirms_interpretation(structured_query_str, cot_text, user_query, 
         "original_query": original_query,
         "original_cot": original_cot
     }
-    resp = requests.post(API_SUBMIT_URL, json=payload)
-    result = resp.json()
-    task_id = result.get("task_id")
-    thoughts = result.get("thoughts", [])
-    cot_text = "\n".join(f"[{t['role'].upper()} - {t['type']}] {t['content']}" for t in thoughts)
+    
+    try:
+        resp = requests.post(API_SUBMIT_URL, json=payload)
+        result = resp.json()
+        task_id = result.get("task_id")
+        thoughts = result.get("thoughts", [])
+        cot_update = "\n".join(f"[{t['role'].upper()} - {t['type']}] {t['content']}" for t in thoughts)
 
-    if not task_id:
-        return f"Error: No task_id returned.\n{cot_text}", "", ""
+        if not task_id:
+            return f"Error: No task_id returned.\n{cot_update}", "", ""
 
-    iframe_html, final_status, code_content = poll_task_status(task_id)
-    code_update = gr.update(value=code_content, visible=bool(code_content))
+        # Poll for results
+        iframe_html, final_status, code_content = poll_task_status(task_id)
+        
+        logger.info(f"📊 Code content length: {len(code_content)}")
+        logger.debug(f"📄 First 200 chars: {code_content[:200]}")
 
-    return cot_text + "\n" + final_status, iframe_html, code_update
+        # RETURN PLAIN STRING - Gradio will handle display
+        return (
+            cot_update + "\n" + final_status,
+            iframe_html,
+            code_content  # ← PLAIN STRING, no gr.update()
+        )
+        
+    except Exception as e:
+        logger.exception(f"Error in on_user_confirms_interpretation: {e}")
+        return f"❌ Exception: {str(e)}", "", ""
 
 def on_flag_click(structured_query_str):
     """Flag bad queries for review."""
@@ -357,12 +338,18 @@ with gr.Blocks() as demo:
 
     with gr.Row():
         status_output = gr.Textbox(label="Status / Task ID", lines=5, interactive=False)
-        code_output = gr.Textbox(label="Generated Python Code", lines=20, interactive=False, visible=False)
+        # ✅ CHANGE: Using gr.Textbox instead of gr.Code for stability
+        code_output = gr.Textbox(
+            label="Generated Python Code",
+            interactive=False, # Make it read-only
+            value="",
+            lines=20 # Control height with lines
+        )
 
     iframe_display = gr.HTML(label="Generated Plots")
 
     submit_btn = gr.Button("Submit Query")
-    edit_btn = gr.Button("✏️ Edit CoT", visible=False)  # Initially hidden
+    edit_btn = gr.Button("✏️ Edit CoT", visible=False)
     confirm_btn = gr.Button("✅ Confirm Interpretation", visible=False)
     reject_btn = gr.Button("❌ Reject Interpretation", visible=False)
     flag_btn = gr.Button("🚩 Flag for Review", visible=False)
@@ -372,23 +359,22 @@ with gr.Blocks() as demo:
         fn=submit_query_to_orchestrator,
         inputs=[user_input, filtered_tickers_box],
         outputs=[
-            cot_output,
-            structured_query_output,
-            status_output,
-            filtered_tickers_box,
-            code_output,
-            edit_btn,  # ✅ show edit button
-            confirm_btn,
-            reject_btn,
-            flag_btn,
-            refresh_btn,
-            submit_btn,
-            user_input,
-            cot_output
+            cot_output,              # 0
+            structured_query_output, # 1 (State)
+            status_output,           # 2
+            filtered_tickers_box,    # 3
+            code_output,             # 4 (Content clear)
+            edit_btn,                # 5
+            confirm_btn,             # 6
+            reject_btn,              # 7
+            flag_btn,                # 8
+            refresh_btn,             # 9
+            submit_btn,              # 10
+            original_query_state,    # 11 (State)
+            original_cot_state       # 12 (State)
         ],
     )
 
-    # ✅ New: When user clicks Edit CoT, make CoT textbox editable
     edit_btn.click(
         fn=lambda: gr.update(interactive=True),
         inputs=[],
@@ -404,7 +390,11 @@ with gr.Blocks() as demo:
             original_query_state,
             original_cot_state
         ],
-        outputs=[status_output, iframe_display, code_output],
+        outputs=[
+            status_output,    # 0
+            iframe_display,   # 1
+            code_output       # 2 (Content update)
+        ],
     )
 
     flag_btn.click(
@@ -419,6 +409,5 @@ with gr.Blocks() as demo:
         outputs=iframe_display,
     )
 
-# ✅ Launch
 if __name__ == "__main__":
     demo.launch(server_port=7860, server_name="0.0.0.0")

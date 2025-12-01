@@ -17,8 +17,9 @@ app = Celery(
     backend=REDIS_URL
 )
 
-SCRIPT_DIR = "generated_scripts"
+SCRIPT_DIR = "/app/generated_scripts"
 os.makedirs(SCRIPT_DIR, exist_ok=True)
+
 
 # Optionally, set the PLOTS_DIR to the same folder your FastAPI serves via StaticFiles.
 # If FastAPI uses PLOTS_DIR = os.path.abspath("."), keep this as '.'
